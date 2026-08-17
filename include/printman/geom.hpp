@@ -6,6 +6,7 @@
 //
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace printman {
@@ -40,7 +41,18 @@ struct Mesh {
     std::vector<std::array<float, 3>> pos;
     std::vector<std::array<float, 3>> nrm;
     std::vector<std::array<float, 2>> uv;
+    // Arbitrary Output Variables: the shader declares named channels (colour "Cout", normals,
+    // displacement, custom masks, ...). aov_names[k] names channel k; aov[k][vid] is its vec3
+    // value at vertex vid. The core carries them all; the PNG/voxel sink selects which to emit.
+    std::vector<std::string> aov_names;
+    std::vector<std::vector<std::array<float, 3>>> aov;
     std::vector<std::array<std::uint32_t, 3>> tri;
+
+    int aov_index(const std::string& name) const {
+        for (std::size_t k = 0; k < aov_names.size(); ++k)
+            if (aov_names[k] == name) return int(k);
+        return -1;
+    }
 };
 
 }  // namespace printman

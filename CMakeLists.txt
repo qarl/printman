@@ -10,10 +10,11 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# The standalone CLI. The host-independent core is header/source under include/ + src/core
-# (added slice by slice); heavy deps (USD, OSL) arrive later as fenced edge modules.
+# The standalone CLI. The host-independent core is header-first under include/printman; heavy deps
+# (USD, OSL) arrive later as fenced edge modules. png.cpp owns the single stb implementation TU.
 add_executable(printman
   src/cli/main.cpp
+  src/core/png.cpp
 )
-target_include_directories(printman PRIVATE include)
+target_include_directories(printman PRIVATE include third_party)
 target_compile_options(printman PRIVATE -Wall -Wextra)
