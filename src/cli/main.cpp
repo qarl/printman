@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "printman/band.hpp"
 #include "printman/png.hpp"
 #include "printman/raster.hpp"
 #include "printman/render.hpp"
@@ -21,27 +22,22 @@ void usage() {
         "\n"
         "usage:\n"
         "  printman --demo [--out DIR] [--aov NAME] [--layer MM] [--res PXMM]\n"
-        "                  [--radius MM] [--amp MM]\n"
+        "                  [--radius MM] [--amp MM] [--bands N]\n"
+        "  printman --gate [--bands N]      verify band-count=1 == band-count=N (design gate)\n"
         "  printman --help\n"
         "\n"
-        "  --demo        procedural planet (stands in for a USD cage until the USD front-end lands)\n"
-        "  --aov NAME    which shader output to rasterize into the PNG stack (default Cout)\n"
-        "                planet AOVs: Cout (albedo), N (normal), disp, height\n"
-        "  --layer MM    layer height (default 0.1)\n"
-        "  --res PXMM    raster resolution, pixels per mm (default 8)\n");
+        "  --aov NAME    shader output to rasterize per layer (default Cout); planet AOVs:\n"
+        "                Cout (albedo), N (normal), disp, height\n"
+        "  --bands N     number of memory-bounded Z-bands (default 8)\n");
 }
 
-// A blank frame covering the mesh XY extent.
-Frame window(const Mesh& m, double ppm, int pad) {
-    double xmin = 1e30, xmax = -1e30, ymin = 1e30, ymax = -1e30;
-    for (auto& p : m.pos) {
-        xmin = std::min(xmin, (double)p[0]); xmax = std::max(xmax, (double)p[0]);
-        ymin = std::min(ymin, (double)p[1]); ymax = std::max(ymax, (double)p[1]);
-    }
+Frame window_for(double xspan, double yspan, double cx, double cy, double ppm, int pad) {
     Frame fr;
-    fr.ppm = ppm; fr.xmin = xmin - pad / ppm; fr.ymin = ymin - pad / ppm;
-    fr.W = (int)std::ceil((xmax - xmin) * ppm) + 2 * pad;
-    fr.H = (int)std::ceil((ymax - ymin) * ppm) + 2 * pad;
+    fr.ppm = ppm;
+    fr.W = (int)std::ceil(xspan * ppm) + 2 * pad;
+    fr.H = (int)std::ceil(yspan * ppm) + 2 * pad;
+    fr.xmin = cx - xspan / 2 - pad / ppm;
+    fr.ymin = cy - yspan / 2 - pad / ppm;
     fr.rgb.assign((size_t)fr.W * fr.H * 3, 0);
     return fr;
 }
@@ -50,50 +46,68 @@ Frame window(const Mesh& m, double ppm, int pad) {
 int main(int argc, char** argv) {
     std::string out = "out", aovname = "Cout";
     double layer = 0.1, ppm = 8.0, R = 20.0, amp = 6.0;
-    int nu = 180, nv = 90;
-    bool demo = false;
+    int nu = 180, nv = 90, bands = 8;
+    bool demo = false, gate = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : ""; };
         if (a == "--demo") demo = true;
+        else if (a == "--gate") gate = true;
         else if (a == "--out") out = next();
         else if (a == "--aov") aovname = next();
         else if (a == "--layer") layer = std::atof(next().c_str());
         else if (a == "--res") ppm = std::atof(next().c_str());
         else if (a == "--radius") R = std::atof(next().c_str());
         else if (a == "--amp") amp = std::atof(next().c_str());
+        else if (a == "--bands") bands = std::atoi(next().c_str());
         else if (a == "--help") { usage(); return 0; }
     }
-    if (!demo) { usage(); return argc < 2 ? 1 : 0; }
+    if (!demo && !gate) { usage(); return argc < 2 ? 1 : 0; }
 
     ProceduralPlanet sh; sh.amp = amp;
-    Mesh m = dice_sphere(R, nu, nv, sh);
-    int aovk = m.aov_index(aovname);
-    if (aovk < 0) {
-        std::fprintf(stderr, "printman: unknown aov '%s' (have:", aovname.c_str());
-        for (auto& n : m.aov_names) std::fprintf(stderr, " %s", n.c_str());
-        std::fprintf(stderr, ")\n");
-        return 1;
-    }
+    SphereCage cage(R, nu, nv, sh);
+    std::vector<double> zs;
+    for (double z = layer * 0.5; z < cage.top; z += layer) zs.push_back(z);
+
+    // XY window: the object spans ~2*(R+amp); centre at origin (cage is centred in XY).
+    double span = 2 * (R + amp);
+    Frame win = window_for(span, span, 0, 0, ppm, 2);
+    int aovk = 0; for (size_t k = 0; k < cage.aov_names.size(); ++k) if (cage.aov_names[k] == aovname) aovk = (int)k;
     bool srgb = (aovname == "Cout");
 
-    double zlo, zhi; mesh_z_range(m, zlo, zhi);
-    std::vector<double> zs;
-    for (double z = layer * 0.5; z < zhi; z += layer) zs.push_back(z);  // layer centres
-    auto layers = slice_mesh(m, zs);
+    if (gate) {
+        auto A = amplify_banded(cage, zs, 1);
+        auto B = amplify_banded(cage, zs, bands);
+        long worst = 0, total_diff = 0;
+        for (size_t li = 0; li < zs.size(); ++li) {
+            Frame fa = win, fb = win;
+            rasterize_layer(fa, A[li], aovk, srgb);
+            rasterize_layer(fb, B[li], aovk, srgb);
+            long d = 0;
+            for (size_t p = 0; p < fa.rgb.size(); ++p) d += (fa.rgb[p] != fb.rgb[p]);
+            worst = std::max(worst, d); total_diff += d;
+        }
+        std::printf("gate: band-count=1 vs band-count=%d over %zu layers @ %dx%d px\n",
+                    bands, zs.size(), win.W, win.H);
+        std::printf("gate: %s  (total differing subpixels=%ld, worst layer=%ld)\n",
+                    total_diff == 0 ? "PASS" : "FAIL", total_diff, worst);
+        return total_diff == 0 ? 0 : 2;
+    }
 
+    // demo: banded PNG stack for the selected AOV + a whole-mesh preview render
+    auto layers = amplify_banded(cage, zs, bands);
     std::error_code ec; std::filesystem::create_directories(out, ec);
-    Frame win = window(m, ppm, 2);
     for (size_t li = 0; li < layers.size(); ++li) {
-        Frame fr = win;  // fresh black background
+        Frame fr = win;
         rasterize_layer(fr, layers[li], aovk, srgb);
-        char path[1024];
-        std::snprintf(path, sizeof(path), "%s/layer_%04zu.png", out.c_str(), li);
+        char path[1024]; std::snprintf(path, sizeof(path), "%s/layer_%04zu.png", out.c_str(), li);
         write_png(path, fr);
     }
+    Mesh m = dice_sphere(R, nu, nv, sh);
     Frame rnd = render_mesh(m, m.aov_index("Cout"), true, true, 25, 15, 700);
     write_png(out + "/render.png", rnd);
 
-    std::printf("printman: %zu layers (aov '%s') + render -> %s/\n", layers.size(), aovname.c_str(), out.c_str());
+    std::printf("printman: %zu layers (aov '%s', %d bands) + render -> %s/\n",
+                layers.size(), aovname.c_str(), bands, out.c_str());
     return 0;
 }

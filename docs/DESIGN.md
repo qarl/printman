@@ -94,6 +94,25 @@ Both designs converge here; state it cleanly:
 - Colour space is pinned: OSL `Cout` is linear; palettes are sRGB; linearize once, match/dither
   in linear, encode to sRGB only at PNG/render write [v2 — the repeat sRGB bug].
 
+## 5a. AOVs — the shader emits arbitrary named outputs, not just colour [★]
+
+Colour ("Cout") is only one of a shader's outputs. A shader declares a set of named **AOVs**
+(arbitrary output variables) — albedo, surface normal, the displacement field itself, a
+material/region id, a scalar mask, any custom field — and the core carries **all** of them,
+interpolated through dicing and slicing, as per-vertex channels (scalars replicate into a vec3).
+Any sink then selects which to emit:
+
+- **PNG stack** — `--aov NAME` rasterizes that channel per layer (colour AOVs sRGB-encoded, data
+  AOVs written raw). One amplification run can yield a colour stack, a normal stack, a height
+  stack, a mask stack — whatever the shader exposes.
+- **Render / voxel** — same selection.
+
+This is the "sampling-many-values" operation — surface colour, shader-driven infill, and custom
+fields are one thing (position in, values out) — generalized across the whole pipeline.
+Displacement stays special *only* in that it drives the geometry; it is equally available as an
+AOV for output. This keeps "the shader defines everything" honest: geometry, colour, and every
+auxiliary field are all the shader's, and the core is just their faithful carrier.
+
 ## 6. Shading evaluator = OSL — LIBRARY's biggest risk is already retired [★]
 
 LIBRARY's #1 risk was "the evaluator is the largest unbuilt subsystem": MaterialX `ShaderGen`
