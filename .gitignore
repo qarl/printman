@@ -25,3 +25,6 @@ AGENTS.md
 # scratch outputs
 /out/
 *.gcode
+
+# clangd
+.cache/
