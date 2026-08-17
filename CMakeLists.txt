@@ -37,3 +37,19 @@ if(PRINTMAN_OSL)
     /opt/homebrew/opt/openimageio/lib/libOpenImageIO.dylib
     /opt/homebrew/opt/openimageio/lib/libOpenImageIO_Util.dylib)
 endif()
+
+# --- USD front-end (fenced heavy dep) -----------------------------------------------------------
+# Loads an arbitrary cage + material from a USD stage. Monolithic static libusd_m needs -force_load
+# so USD's static type/plugin registries are not stripped, plus explicit plugin registration.
+option(PRINTMAN_USD "Build with the USD front-end" OFF)
+if(PRINTMAN_USD)
+  set(USD_ROOT "/Users/qarl/src/OrcaSlicer/deps/build/arm64/OrcaSlicer_dep/usr/local" CACHE PATH "OpenUSD install prefix")
+  target_sources(printman PRIVATE src/usd/usd_read.cpp)
+  target_compile_definitions(printman PRIVATE PRINTMAN_USD PRINTMAN_USD_PLUGINDIR="${USD_ROOT}/lib/usd")
+  target_include_directories(printman PRIVATE ${USD_ROOT}/include)
+  file(GLOB PM_BOOST "${USD_ROOT}/lib/libboost_*.a")
+  target_link_libraries(printman PRIVATE
+    -Wl,-force_load,${USD_ROOT}/lib/libusd_m.a
+    ${PM_BOOST} ${USD_ROOT}/lib/libtbb.a
+    "-framework CoreFoundation" "-framework Cocoa")
+endif()
