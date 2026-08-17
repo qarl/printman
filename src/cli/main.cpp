@@ -3,10 +3,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "printman/band.hpp"
+#ifdef PRINTMAN_OSL
+#include "printman/osl.hpp"
+#endif
 #include "printman/png.hpp"
 #include "printman/raster.hpp"
 #include "printman/render.hpp"
@@ -44,8 +48,8 @@ Frame window_for(double xspan, double yspan, double cx, double cy, double ppm, i
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string out = "out", aovname = "Cout";
-    double layer = 0.1, ppm = 8.0, R = 20.0, amp = 6.0;
+    std::string out = "out", aovname = "Cout", osl_disp, osl_color, shaderdir;
+    double layer = 0.1, ppm = 8.0, R = 20.0, amp = 6.0, reach = 0;
     int nu = 180, nv = 90, bands = 8;
     bool demo = false, gate = false;
     for (int i = 1; i < argc; ++i) {
@@ -60,11 +64,24 @@ int main(int argc, char** argv) {
         else if (a == "--radius") R = std::atof(next().c_str());
         else if (a == "--amp") amp = std::atof(next().c_str());
         else if (a == "--bands") bands = std::atoi(next().c_str());
+        else if (a == "--osl-disp") osl_disp = next();
+        else if (a == "--osl-color") osl_color = next();
+        else if (a == "--shaderdir") shaderdir = next();
+        else if (a == "--reach") reach = std::atof(next().c_str());
         else if (a == "--help") { usage(); return 0; }
     }
     if (!demo && !gate) { usage(); return argc < 2 ? 1 : 0; }
+    if (reach <= 0) reach = amp;
 
-    ProceduralPlanet sh; sh.amp = amp;
+    std::unique_ptr<Shader> shp;
+#ifdef PRINTMAN_OSL
+    if (!osl_disp.empty() || !osl_color.empty()) {
+        try { shp = std::make_unique<OslShader>(shaderdir, osl_disp, osl_color, reach); }
+        catch (const std::exception& e) { std::fprintf(stderr, "printman: OSL load failed: %s\n", e.what()); return 1; }
+    }
+#endif
+    if (!shp) { auto pp = std::make_unique<ProceduralPlanet>(); pp->amp = amp; shp = std::move(pp); }
+    Shader& sh = *shp;
     SphereCage cage(R, nu, nv, sh);
     std::vector<double> zs;
     for (double z = layer * 0.5; z < cage.top; z += layer) zs.push_back(z);
@@ -72,8 +89,10 @@ int main(int argc, char** argv) {
     // XY window: the object spans ~2*(R+amp); centre at origin (cage is centred in XY).
     double span = 2 * (R + amp);
     Frame win = window_for(span, span, 0, 0, ppm, 2);
-    int aovk = 0; for (size_t k = 0; k < cage.aov_names.size(); ++k) if (cage.aov_names[k] == aovname) aovk = (int)k;
-    bool srgb = (aovname == "Cout");
+    if (cage.aov_names.empty()) { std::fprintf(stderr, "printman: shader produced no AOVs\n"); return 1; }
+    int aovk = -1; for (size_t k = 0; k < cage.aov_names.size(); ++k) if (cage.aov_names[k] == aovname) aovk = (int)k;
+    if (aovk < 0) { std::fprintf(stderr, "printman: aov '%s' not found, using '%s'\n", aovname.c_str(), cage.aov_names[0].c_str()); aovk = 0; }
+    bool srgb = (cage.aov_names[aovk] == "Cout");
 
     if (gate) {
         auto A = amplify_banded(cage, zs, 1);
@@ -104,7 +123,8 @@ int main(int argc, char** argv) {
         write_png(path, fr);
     }
     Mesh m = dice_sphere(R, nu, nv, sh);
-    Frame rnd = render_mesh(m, m.aov_index("Cout"), true, true, 25, 15, 700);
+    int rc = m.aov_index("Cout"); bool rsrgb = rc >= 0; if (rc < 0) rc = 0;
+    Frame rnd = render_mesh(m, rc, rsrgb, true, 25, 15, 700);
     write_png(out + "/render.png", rnd);
 
     std::printf("printman: %zu layers (aov '%s', %d bands) + render -> %s/\n",
