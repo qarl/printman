@@ -8,20 +8,32 @@ Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what'
 2. **Neutral core**: `geom.hpp` (V2/V3/Ring/Region/LayerContours/ContourStack/Mesh), zero host types.
 3. **REYES band loop + invariance gate** (`band.hpp`): bound-split → dice (per band) → displace →
    slice → emit → discard. `printman --gate --bands N` proves **band-count=1 == band-count=N**
-   (PASS, pixel-identical; passes with the OSL earth shader too). This is the design's keystone.
+   (PASS, pixel-identical). This is the design's keystone. The built-in sphere is now *only* the
+   gate's controlled test surface — it is no longer a render/input mode.
 4. **AOV PNG stacks + z-buffer render** (`slicer.hpp` own tri-slicer + non-zero winding fill in
-   `raster.hpp`; `render.hpp`). Any shader AOV rasterizes: `--aov Cout|N|disp|height`.
-5. **Procedural planet shader** (`shader.hpp`) — zero-dep, the default `--demo`.
-6. **OSL backend** (`osl.hpp`, option `PRINTMAN_OSL`) — real user OSL shaders drive it. Earth
-   disp+colour shaders + textures → coloured displaced globe as PNG stack + render, ~1.3s.
+   `raster.hpp`; `render.hpp`). A render is written by default; the per-layer PNG stack is opt-in
+   via `--stack`. Any shader AOV rasterizes: `--aov Cout|N|disp|height`.
+5. **Procedural planet shader** (`shader.hpp`) — zero-dep; drives the gate.
+6. **OSL backend** (`osl.hpp`, option `PRINTMAN_OSL`) — real user OSL shaders drive it.
 7. **USD front-end** (`usd.hpp`/`usd_read.cpp` + `subdiv.hpp`, option `PRINTMAN_USD`) — loads a
-   Mesh + face-varying `st` + bound material (shader info:id, `printman:maxMagnitude`), Catmull-
-   Clark subdivides (fork's validated evaluator), amplifies. `printman scene.usda` works.
+   Mesh + face-varying `st` + bound material, Catmull-Clark subdivides, amplifies.
+8. **Renders any USD input** — `printman scene.usda`. The **combined build links `PRINTMAN_OSL`
+   + `PRINTMAN_USD`** (no tbb/Imath clash at link or runtime), so a USD that binds our OSL shaders
+   runs them (earth USD → its own `printman_earth*`). A material we can't evaluate is **not an
+   error**: fall back per USD convention — our OSL shader (only if its `.oso` exists) → sampled
+   UsdPreviewSurface `diffuseColor` texture → constant `diffuseColor` → `primvars:displayColor` →
+   0.18 gray; always zero displacement.
+9. **Up-axis normalized to Z at load** (`usd_read.cpp`). USD default is Y-up; Y-up assets are
+   rotated +90° about X to PrintMan's Z-up slicing frame. `upAxis="Z"` assets untouched.
+10. **UsdPreviewSurface `diffuseColor` textures sampled** (`texshader.hpp`, behind `PRINTMAN_OSL`
+    for OIIO). Walk `diffuseColor` → `UsdUVTexture` → `file`; pull bytes via the USD asset resolver
+    (`.usdz`-embedded or loose); decode with OIIO; sRGB→linear; sample per corner at `st`.
+    Validated: Apple `teapot.usdz` (52k pts, PBR, Y-up) loads, stands upright, renders its baseColor.
 
 ## Build
 
 ```
-cmake -S . -B build -G Ninja [-DPRINTMAN_OSL=ON] [-DPRINTMAN_USD=ON]
+cmake -S . -B build -G Ninja -DPRINTMAN_OSL=ON -DPRINTMAN_USD=ON   # canonical combined build
 cmake --build build
 ```
 - OSL: local build at `~/tmp/osl`; brew OIIO/Imath/fmt. Link `liboslexec.dylib` + OIIO(+_Util).
@@ -33,28 +45,26 @@ cmake --build build
 ## Usage
 
 ```
-printman --demo --out out --aov Cout                       # procedural planet
-printman --gate --bands 8                                  # band-invariance gate
-printman --demo --osl-disp printman_earth_disp --osl-color printman_earth \
-         --shaderdir <fork>/build/arm64/osl_shaders --reach 20 --radius 20 --out out
-printman scene.usda --subdiv-level 3 --out out             # load + amplify a USD cage
+printman scene.usda --out out                              # render any USD (its own shaders/material)
+printman scene.usda --shaderdir <dir> --subdiv-level 3 --stack   # + the OSL shaders + slice stack
+printman --gate --bands 8                                  # band-invariance self-test
 ```
 
 ## NEXT (in priority order — do NOT start mid-context; these are fresh units)
 
-1. **USD + OSL together (untested link).** Today the USD path runs the *procedural* shader (or OSL
-   separately); the USD material's OSL shader names are read but running them needs both deps
-   linked at once. Risk: OSL's OIIO-tbb vs USD's tbb / Imath clash. Configure `-DPRINTMAN_OSL=ON
-   -DPRINTMAN_USD=ON`, resolve any duplicate-tbb/Imath issue, then `printman scene.usda` uses the
-   material's shaders → the *real* earth from its own USD.
-2. **Per-band subdivision for the USD path.** `amplify_usd` materializes the whole refined cage
-   (not memory-bounded). The `SphereCage` path IS banded; port that structure to subdivided cages
+1. **Per-band subdivision for the USD path.** `amplify_usd` materializes the whole refined cage
+   (not memory-bounded). The gate/sphere path IS banded; port that structure to subdivided cages
    (dice only a band's faces + halo). Keep the gate green.
+2. **Mesh local-to-world transform.** The loader reads a mesh's *local* points; a parent Xform
+   (translate/rotate/scale) is ignored. Apply `ComputeLocalToWorldTransform` (composes cleanly with
+   the up-axis step). Not needed for origin-centred assets (earth, teapot); will bite on arbitrary scenes.
 3. **UV-seam displacement weld.** Per-corner displacement can crack at *non-periodic* UV seams
    (earth is periodic, fine). Reference: the fork's per-face-average one-position-per-vertex weld.
-4. **Colour→filament is a sink/host step** (design §5): the core carries albedo RGB (Cout AOV);
+4. **Texture fidelity follow-ups** (`texshader.hpp`): honor the `st` transform (scale/bias/rotate),
+   wrap modes beyond repeat, and non-`st` primvar names. Albedo only by design (no roughness/metallic/normal).
+5. **Colour→filament is a sink/host step** (design §5): the core carries albedo RGB (Cout AOV);
    FDM dither/quantize + J55 tank separation are per-sink, not built.
-5. **Not started**: FDM contour export, J55 VoxelPrint bitmaps, resin `.sl1`, Orca/CuraEngine
+6. **Not started**: FDM contour export, J55 VoxelPrint bitmaps, resin `.sl1`, Orca/CuraEngine
    adapters, adaptive dicing, self-supporting clamp. See `DESIGN.md` §10–13.
 
 ## Vendored / copied
