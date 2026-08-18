@@ -81,4 +81,16 @@ struct ProceduralPlanet : Shader {
     double max_reach() const override { return amp; }
 };
 
+// The USD convention fallback for a material PrintMan cannot evaluate: no displacement, a flat
+// albedo taken (by the loader) from primvars:displayColor, else a UsdPreviewSurface constant
+// diffuseColor, else the 0.18 neutral gray. A slicer that can't run the bound shader still slices
+// the base geometry -- exactly USD's "displayColor even without a specified shader" fallback.
+struct FlatShader : Shader {
+    V3 color{{0.18, 0.18, 0.18}};
+    double displace(const V3&, const V3&, const V2&) const override { return 0.0; }
+    std::vector<std::string> aov_names() const override { return {"Cout"}; }
+    void shade(const V3&, const V3&, const V2&, V3* out) const override { out[0] = color; }
+    double max_reach() const override { return 0.0; }
+};
+
 }  // namespace printman
