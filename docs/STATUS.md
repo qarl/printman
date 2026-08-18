@@ -66,6 +66,18 @@ Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what'
     uniformly (all-quad → direct; any non-quad → center-split every face, so mixed quad/tri stays
     crack-free too). Verified watertight on a 2/18/20 mm quad strip and on triangle/pentagon/mixed
     cases: the odd-count (boundary) edges trace the outline exactly, no interior gaps.
+17. **Adaptive Catmull-Clark** (`amplify_usd_adaptive`) — each control face dices to its OWN edge
+    scale, not one global level. The band region still refines uniformly to the global level (so a
+    core face's refined vertices are bit-identical across bands, keeping the invariance gate pixel-
+    exact), but instead of emitting every micropolygon it reconstructs each face's (2^L+1)² vertex
+    lattice and emits a **coarser per-face grid** sized to that face's control edges, each shared edge
+    snapped to its own edge-intrinsic `device_level` — both sides pick the same lattice nodes, so the
+    seam can't tear. No hand-derived limit stencils: the lattice is read off a parametric-`fvar`
+    template through the existing OpenSubdiv-validated subdivider. **All-quad control cages only** — a
+    cage with any non-quad control face (e.g. a UV sphere's triangle poles) stays on the uniform path.
+    Verified: sphere + earth gates green; a new all-quad box gate green at bands 8/16 (adaptive); a
+    closed extraordinary-vertex box and an open 2/18/20 mm strip are both crack-free and band-invariant;
+    a 40×8×8 box emits 36 864 tri vs 196 608 uniform (19%, a 5× cut) with no visible seams.
 
 ## Build
 
@@ -93,9 +105,10 @@ printman scene.usda --gate --bands 8                       # USD band-invariance
 
 ## NEXT (in priority order — do NOT start mid-context; these are fresh units)
 
-1. **Adaptive dicing for Catmull-Clark surfaces.** CC cages currently dice at one uniform level per
-   output. True adaptive CC needs arbitrary-(u,v) limit-surface evaluation (OpenSubdiv-style) so each
-   face refines to its own screen/bead scale — a bigger piece than the polygon tessellator.
+1. **Adaptive CC for non-quad control cages.** Adaptive Catmull-Clark today needs an all-quad control
+   cage; a cage with a triangle/n-gon control face (e.g. a UV sphere's poles) falls back to the uniform
+   band loop. Extend by center-splitting non-quad control faces (as the polygon path does) so their
+   corner-quads get the lattice-subsample treatment too.
 2. **UV-seam / material-boundary displacement weld.** Per-corner displacement can crack at
    *non-periodic* UV seams (earth is periodic, fine), and a boundary between two subsets with
    *different* displacement can gap (colour-only subsets are crack-free). Reference: the fork's

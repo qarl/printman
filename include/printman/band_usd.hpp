@@ -12,6 +12,7 @@
 // of the vertex => band-count=1 and band-count=N slice pixel-identically (the USD gate proves it).
 //
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -138,6 +139,175 @@ inline std::vector<LayerSegs> amplify_usd_banded(const UsdCage& uc,
         // band geometry (sub, r, vn, parts, bm, segs) is freed here -- the memory bound
     }
     return out;
+}
+
+// ADAPTIVE Catmull-Clark: dice each control face to its OWN edge scale, not one global level. Refine
+// the band's region uniformly to the global level `level` (so a core face's refined vertices are
+// shared/bit-identical across bands -- the invariance gate stays pixel-exact), then emit a COARSER
+// per-face grid whose four sides each carry that control edge's own device_level. A shared control
+// edge gives both faces the same level and the same lattice nodes, so the seam matches (crack-free),
+// while a large flat face emits far fewer micropolygons. The (2^level+1)^2 vertex lattice is read off
+// a TEMPLATE (a single parametric quad refined once: fvar refines to an exact dyadic (i,j), and the
+// quad-child ordering is universal), so no per-band parametric pass is needed. ALL-QUAD control cages
+// only -- a cage with any non-quad control face uses the uniform amplify_usd_banded path, since
+// crack-free needs one dicing discipline across the whole mesh.
+inline std::vector<LayerSegs> amplify_usd_adaptive(const UsdCage& uc,
+        const std::vector<const Shader*>& shaders, int level, double tol,
+        const std::vector<double>& zs, int nbands,
+        const std::function<void(const Mesh&)>& on_band = {}, bool do_slice = true) {
+    std::vector<LayerSegs> out(zs.size());
+    const size_t nz = zs.size();
+    if (nz == 0 || nbands < 1) return out;
+    const int Lg = std::max(level, 0);
+    const int S = 1 << Lg;                       // segments per side at the global level
+
+    subdiv::Cage cage = subdiv::build_cage(uc.points, uc.counts, uc.indices, {}, {}, {}, {}, {},
+                                           subdiv::BOUNDARY_EDGE_AND_CORNER, false, uc.st);
+    const auto vf = subdiv::vertex_faces(cage);
+    const int nf = cage.nfaces();
+
+    // TEMPLATE: refine one parametric quad to `level`; tmpl[m*4+c] = lattice node index (j*(S+1)+i)
+    // of leaf m's corner c. Every quad's leaf block shares this ordering, so the map is reusable.
+    std::vector<int> tmpl((size_t)S * S * 4);
+    {
+        subdiv::Cage tq;
+        tq.verts = {{0,0,0},{1,0,0},{1,1,0},{0,1,0}}; tq.fvi = {0,1,2,3}; tq.foff = {0,4};
+        tq.corner_sharp.assign(4, 0.0); tq.boundary = subdiv::BOUNDARY_EDGE_AND_CORNER;
+        tq.fvar = {{0,0},{1,0},{1,1},{0,1}};
+        subdiv::Cage tr = subdiv::subdivide(tq, "catmullClark", Lg);
+        for (int m = 0; m < S * S; ++m)
+            for (int k = tr.foff[m], c = 0; k < tr.foff[m + 1]; ++k, ++c) {
+                int i = (int)std::llround(tr.fvar[k][0] * S), j = (int)std::llround(tr.fvar[k][1] * S);
+                tmpl[(size_t)m * 4 + c] = j * (S + 1) + i;
+            }
+#ifndef NDEBUG
+        // The template must cover every (i,j) lattice node (surjective) -- otherwise latflat keeps a
+        // stale/-1 entry and emit() reads a wrong vertex. Fails loudly if subdivide's child/corner
+        // ordering ever stops being a pure function of local corner order (the reused-block premise).
+        std::vector<char> hit((size_t)(S + 1) * (S + 1), 0);
+        for (int x : tmpl) { assert(x >= 0 && x < (int)hit.size()); hit[x] = 1; }
+        for (char h : hit) assert(h && "template lattice does not tile every node");
+#endif
+    }
+
+    // per-control-face z-hull over its 1-ring (same band bound as the uniform path)
+    std::vector<double> flo(nf, 1e30), fhi(nf, -1e30);
+    for (int f = 0; f < nf; ++f)
+        for (int k = cage.foff[f]; k < cage.foff[f + 1]; ++k)
+            for (int nfc : vf[cage.fvi[k]])
+                for (int kk = cage.foff[nfc]; kk < cage.foff[nfc + 1]; ++kk) {
+                    double z = cage.verts[cage.fvi[kk]][2];
+                    flo[f] = std::min(flo[f], z); fhi[f] = std::max(fhi[f], z);
+                }
+
+    double max_disp = 0; for (const Shader* s : shaders) max_disp = std::max(max_disp, s->max_reach());
+    const std::vector<int> ctag = uc.face_material.empty() ? std::vector<int>(nf, 0) : uc.face_material;
+    const int M = int(shaders.size());
+    // a control edge's segment count -- edge-intrinsic (world length only), so neighbours agree.
+    auto side_seg = [&](int f, int c0, int c1) -> int {
+        const auto& a = cage.verts[cage.fvi[cage.foff[f] + c0]]; const auto& b = cage.verts[cage.fvi[cage.foff[f] + c1]];
+        double d = std::sqrt((a[0]-b[0])*(a[0]-b[0]) + (a[1]-b[1])*(a[1]-b[1]) + (a[2]-b[2])*(a[2]-b[2]));
+        return 1 << std::min(Lg, subdiv::device_level(1.0, d, tol, 0.0));
+    };
+    auto snap = [](double v, int seg){ return std::round(v * seg) / seg; };
+    std::vector<int> latflat((size_t)(S + 1) * (S + 1), -1);   // (i,j) -> corner index in r; reused per face
+
+    for (int b = 0; b < nbands; ++b) {
+        size_t g0 = (size_t)b * nz / nbands, g1 = (size_t)(b + 1) * nz / nbands;
+        if (g0 >= g1) continue;
+        const double zlo = zs[g0], zhi = zs[g1 - 1];
+        std::vector<int> core;
+        for (int f = 0; f < nf; ++f)
+            if (fhi[f] >= zlo - max_disp && flo[f] <= zhi + max_disp) core.push_back(f);
+        if (core.empty()) continue;
+        const int ncore = int(core.size());
+
+        subdiv::Cage sub = subdiv::build_region_subcage(cage, vf, core);
+        subdiv::Cage r = subdiv::subdivide(sub, "catmullClark", Lg);   // geometry + real UV, core leads
+
+        // halo-inclusive per-vertex normals over the full refined region (band-independent for core)
+        std::vector<V3> vn(r.verts.size(), V3{{0, 0, 0}});
+        for (int f = 0; f < r.nfaces(); ++f) {
+            int a = r.foff[f], e = r.foff[f + 1]; V3 n{{0, 0, 0}};
+            for (int i = a; i < e; ++i) { const auto& p0 = r.verts[r.fvi[i]]; const auto& p1 = r.verts[r.fvi[(i + 1 < e) ? i + 1 : a]];
+                n[0] += (p0[1]-p1[1])*(p0[2]+p1[2]); n[1] += (p0[2]-p1[2])*(p0[0]+p1[0]); n[2] += (p0[0]-p1[0])*(p0[1]+p1[1]); }
+            for (int i = a; i < e; ++i) { vn[r.fvi[i]][0]+=n[0]; vn[r.fvi[i]][1]+=n[1]; vn[r.fvi[i]][2]+=n[2]; }
+        }
+        for (auto& n : vn) { double l = std::sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]); if (l > 1e-12) { n[0]/=l; n[1]/=l; n[2]/=l; } }
+
+        std::vector<Mesh> parts(M); std::vector<int> na(M); int maxna = 1;
+        for (int m = 0; m < M; ++m) { parts[m].aov_names = shaders[m]->aov_names(); na[m] = int(parts[m].aov_names.size()); parts[m].aov.resize(na[m]); maxna = std::max(maxna, na[m]); }
+        std::vector<V3> av(maxna);
+        const bool hasuv = r.has_uv();
+
+        for (int fl = 0; fl < ncore; ++fl) {
+            const int orig = core[fl];
+            int mi = (orig < int(ctag.size())) ? ctag[orig] : 0; if (mi < 0 || mi >= M) mi = 0;
+            Mesh& mm = parts[mi]; const Shader& sh = *shaders[mi]; const int nak = na[mi];
+            // reconstruct this face's lattice: leaf block [fl*S^2, (fl+1)*S^2), corner c -> tmpl node.
+            // 64-bit leaf index: at level 8 a face is 65536 leaves, so fl*S*S overflows int past ~32k faces.
+            const long long lo = (long long)fl * S * S;
+            for (long long m = 0; m < (long long)S * S; ++m) { const long long g = lo + m;
+                assert(r.foff[g + 1] - r.foff[g] == 4 && "adaptive CC needs quad leaves (all-quad cage)");
+                for (int k = r.foff[g], c = 0; k < r.foff[g + 1]; ++k, ++c) latflat[tmpl[(size_t)m * 4 + c]] = k;
+            }
+            const int ns0 = side_seg(orig, 0, 1), ns2 = side_seg(orig, 3, 2);   // bottom, top (s dir)
+            const int nt1 = side_seg(orig, 1, 2), nt3 = side_seg(orig, 0, 3);   // right, left (t dir)
+            const int Ns = std::max(ns0, ns2), Nt = std::max(nt1, nt3);
+            auto emit = [&](double s, double t) -> std::uint32_t {
+                int li = (int)std::llround(s * S), lj = (int)std::llround(t * S);
+                int corner = latflat[(size_t)lj * (S + 1) + li];
+                assert(corner >= 0 && "lattice node not populated -- template/coverage broke");
+                int vid = r.fvi[corner]; const auto& P = r.verts[vid]; const V3& N = vn[vid];
+                V3 Pv{{P[0], P[1], P[2]}};
+                V2 uv = hasuv ? V2{{r.fvar[corner][0], r.fvar[corner][1]}} : V2{{0, 0}};
+                double d = sh.displace(Pv, N, uv); sh.shade(Pv, N, uv, av.data());
+                std::uint32_t id = (std::uint32_t)mm.pos.size();
+                mm.pos.push_back({(float)(P[0]+d*N[0]), (float)(P[1]+d*N[1]), (float)(P[2]+d*N[2])});
+                mm.nrm.push_back({(float)N[0], (float)N[1], (float)N[2]});
+                mm.uv.push_back({(float)uv[0], (float)uv[1]});
+                for (int k = 0; k < nak; ++k) mm.aov[k].push_back({(float)av[k][0], (float)av[k][1], (float)av[k][2]});
+                return id;
+            };
+            std::vector<std::uint32_t> idx((size_t)(Ns + 1) * (Nt + 1));
+            for (int j = 0; j <= Nt; ++j) for (int i = 0; i <= Ns; ++i) {
+                double s = (double)i/Ns, t = (double)j/Nt;
+                if (j == 0) s = snap(s, ns0); else if (j == Nt) s = snap(s, ns2);
+                if (i == 0) t = snap(t, nt3); else if (i == Ns) t = snap(t, nt1);
+                idx[(size_t)j*(Ns+1)+i] = emit(s, t);
+            }
+            for (int j = 0; j < Nt; ++j) for (int i = 0; i < Ns; ++i) {
+                std::uint32_t v00 = idx[(size_t)j*(Ns+1)+i], v10 = idx[(size_t)j*(Ns+1)+i+1];
+                std::uint32_t v11 = idx[(size_t)(j+1)*(Ns+1)+i+1], v01 = idx[(size_t)(j+1)*(Ns+1)+i];
+                mm.tri.push_back({v00, v10, v11}); mm.tri.push_back({v00, v11, v01});
+            }
+        }
+        Mesh bm = (M == 1) ? std::move(parts[0]) : merge_meshes(parts);
+        if (do_slice) { std::vector<double> bandzs(zs.begin()+g0, zs.begin()+g1); auto segs = slice_mesh(bm, bandzs); for (size_t k=0;k<segs.size();++k) out[g0+k]=std::move(segs[k]); }
+        if (on_band) on_band(bm);
+    }
+    return out;
+}
+
+// Estimate of the micropolygon-triangle count amplify_usd_adaptive emits at (level, tol) -- one
+// per-face grid whose sides carry each control edge's own clamped device_level (for the CLI stat).
+inline size_t usd_adaptive_tri_estimate(const UsdCage& uc, int level, double tol) {
+    const int Lg = std::max(level, 0);
+    const int nf = int(uc.counts.size());
+    std::vector<int> foff(nf + 1, 0);
+    for (int f = 0; f < nf; ++f) foff[f + 1] = foff[f] + uc.counts[f];
+    auto seg = [&](int f, int c0, int c1) -> int {
+        const auto& a = uc.points[uc.indices[foff[f] + c0]]; const auto& b = uc.points[uc.indices[foff[f] + c1]];
+        double d = std::sqrt((a[0]-b[0])*(a[0]-b[0]) + (a[1]-b[1])*(a[1]-b[1]) + (a[2]-b[2])*(a[2]-b[2]));
+        return 1 << std::min(Lg, subdiv::device_level(1.0, d, tol, 0.0));
+    };
+    size_t tris = 0;
+    for (int f = 0; f < nf; ++f) {
+        if (foff[f + 1] - foff[f] != 4) continue;
+        int Ns = std::max(seg(f, 0, 1), seg(f, 3, 2)), Nt = std::max(seg(f, 1, 2), seg(f, 0, 3));
+        tris += (size_t)Ns * Nt * 2;
+    }
+    return tris;
 }
 
 // Band count for a target thickness ~ the widest control-face 1-ring Z-span, clamped [16, 256]
