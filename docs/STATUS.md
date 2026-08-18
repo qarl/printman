@@ -40,6 +40,28 @@ Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what'
     index; the tag rides through subdivision (CC/bilinear one child per corner, loop corner-then-
     centre triangles), and each face is emitted with its own shader. Validated: a two-subset cube
     slices with both colours (a gradient across the fill) and holds through 3 Catmull-Clark levels.
+13. **Full-REYES band loop for the USD path + its own invariance gate.** `amplify_usd_banded`
+    (subdiv cages) and `amplify_poly_banded` (polygons) subdivide → displace → slice **one Z-band at
+    a time and discard** — memory-bounded, never materializing the whole refined surface. Localized
+    Catmull-Clark refinement (a core face + its 1-ring halo refines bit-identically to a whole-cage
+    refinement) plus **halo-inclusive per-vertex normals** make displacement band-independent.
+    `printman scene.usda --gate --bands N` proves **band-count=1 == band-count=N** pixel-identically
+    (catmullClark meshes, 0 differing subpixels) — the USD counterpart of the sphere gate.
+14. **Incremental per-band render.** `render_into` accumulates into a shared frame/z-buffer, so the
+    preview composites band-by-band as the loop runs — the render never holds the whole surface either.
+15. **Per-output auto-dicing** — each output picks its own shading rate. With `--subdiv-level` AUTO
+    (default) the **slice** dices to the bead/extrusion width (`--line-width`, default 0.4 mm) and the
+    **render** dices to ~1 framebuffer pixel (from `--rres`, default 700), via `device_level`.
+    Different tolerances → two independent banded passes (slice + render); equal → one shared pass. A
+    fixed `--subdiv-level N` overrides both. Layer width and bead width are genuinely different scales.
+16. **Displacement on polygon meshes, RenderMan-style** (`subdivisionScheme = none`/`bilinear` with a
+    displacement shader) — non-subdiv polygons are **diced into micropolygons and displaced**, not left
+    flat. **Quad meshes dice adaptively** (`amplify_poly_banded`): each face splits to its own edge
+    scale (`edge_segments(len, tol)`), crack-free — segment counts are **edge-intrinsic** so shared
+    edges agree, boundary params snap to the shared count, and per-control-vertex normals are shared
+    across faces so a displaced boundary matches on both sides. Verified watertight on a 2/18/20 mm quad
+    strip (thin quad diced 8×64, wide 64×64, no gaps). Non-quad polygons use a **uniform bilinear** band
+    loop.
 
 ## Build
 
@@ -56,27 +78,34 @@ cmake --build build
 ## Usage
 
 ```
-printman scene.usda --out out                              # render any USD (its own shaders/material)
+printman scene.usda                                        # auto-dice: slice to bead, render to pixels
 printman scene.usda --quad                                 # 2×2 contact sheet, four angles, white bg
-printman scene.usda --shaderdir <dir> --subdiv-level 3 --stack   # + the OSL shaders + slice stack
-printman --gate --bands 8                                  # band-invariance self-test
+printman scene.usda --shaderdir <dir> --stack              # + OSL shaders + per-layer slice PNG stack
+printman scene.usda --line-width 0.3 --rres 1200           # override bead width / render resolution
+printman scene.usda --osl-disp NAME --osl-color NAME       # force shaders onto the scene's material
+printman --gate --bands 8                                  # sphere band-invariance self-test
+printman scene.usda --gate --bands 8                       # USD band-invariance self-test (catmullClark)
 ```
 
 ## NEXT (in priority order — do NOT start mid-context; these are fresh units)
 
-1. **Per-band subdivision for the USD path.** `amplify_usd` materializes the whole refined cage
-   (not memory-bounded). The gate/sphere path IS banded; port that structure to subdivided cages
-   (dice only a band's faces + halo). Keep the gate green.
-2. **UV-seam / material-boundary displacement weld.** Per-corner displacement can crack at
+1. **Adaptive dicing for triangle / n-gon polygon meshes.** Today only all-quad polygon meshes dice
+   adaptively; triangle/n-gon meshes fall back to a uniform bilinear level. Barycentric adaptive
+   tessellation with the same crack-free discipline (edge-intrinsic segment counts, shared vertex
+   normals, boundary snapping).
+2. **Adaptive dicing for Catmull-Clark surfaces.** CC cages currently dice at one uniform level per
+   output. True adaptive CC needs arbitrary-(u,v) limit-surface evaluation (OpenSubdiv-style) so each
+   face refines to its own screen/bead scale — a bigger piece than the quad tessellator.
+3. **UV-seam / material-boundary displacement weld.** Per-corner displacement can crack at
    *non-periodic* UV seams (earth is periodic, fine), and a boundary between two subsets with
    *different* displacement can gap (colour-only subsets are crack-free). Reference: the fork's
    per-face-average one-position-per-vertex weld.
-3. **Texture fidelity follow-ups** (`texshader.hpp`): honor the `st` transform (scale/bias/rotate),
+4. **Texture fidelity follow-ups** (`texshader.hpp`): honor the `st` transform (scale/bias/rotate),
    wrap modes beyond repeat, and non-`st` primvar names. Albedo only by design (no roughness/metallic/normal).
-4. **Colour→filament is a sink/host step** (design §5): the core carries albedo RGB (Cout AOV);
+5. **Colour→filament is a sink/host step** (design §5): the core carries albedo RGB (Cout AOV);
    FDM dither/quantize + J55 tank separation are per-sink, not built.
-5. **Not started**: FDM contour export, J55 VoxelPrint bitmaps, resin `.sl1`, Orca/CuraEngine
-   adapters, adaptive dicing, self-supporting clamp. See `DESIGN.md` §10–13.
+6. **Not started**: FDM contour export, J55 VoxelPrint bitmaps, resin `.sl1`, Orca/CuraEngine
+   adapters, self-supporting clamp. See `DESIGN.md` §10–13.
 
 ## Vendored / copied
 - `third_party/stb_image_write.h` (public domain).
