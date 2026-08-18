@@ -28,10 +28,12 @@ namespace printman {
 
 // `shaders` is one per uc.materials entry; `zs` are the (ascending) layer heights in the cage frame;
 // `nbands` splits `zs` into that many disjoint layer ranges. Returns per-layer slice segments.
+// on_band, if set, is handed each band's mesh before it's freed (e.g. to render it). do_slice=false
+// skips the slice (for a render-only pass at a different dicing level), returning empty layers.
 inline std::vector<LayerSegs> amplify_usd_banded(const UsdCage& uc,
         const std::vector<const Shader*>& shaders, int level,
         const std::vector<double>& zs, int nbands,
-        const std::function<void(const Mesh&)>& on_band = {}) {
+        const std::function<void(const Mesh&)>& on_band = {}, bool do_slice = true) {
     std::vector<LayerSegs> out(zs.size());
     const size_t nz = zs.size();
     if (nz == 0 || nbands < 1) return out;
@@ -121,9 +123,11 @@ inline std::vector<LayerSegs> amplify_usd_banded(const UsdCage& uc,
             }
             Mesh bm = (M == 1) ? std::move(parts[0]) : merge_meshes(parts);
 
-            std::vector<double> bandzs(zs.begin() + g0, zs.begin() + g1);
-            auto segs = slice_mesh(bm, bandzs);
-            for (size_t k = 0; k < segs.size(); ++k) out[g0 + k] = std::move(segs[k]);
+            if (do_slice) {
+                std::vector<double> bandzs(zs.begin() + g0, zs.begin() + g1);
+                auto segs = slice_mesh(bm, bandzs);
+                for (size_t k = 0; k < segs.size(); ++k) out[g0 + k] = std::move(segs[k]);
+            }
             if (on_band) on_band(bm);   // e.g. render this band into a shared frame before it's freed
         }
         // band geometry (sub, r, vn, parts, bm, segs) is freed here -- the memory bound
