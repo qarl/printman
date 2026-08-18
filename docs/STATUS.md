@@ -1,4 +1,4 @@
-# printman — status (2026-08-17)
+# printman — status (2026-08-18)
 
 Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what's built vs next.
 
@@ -12,7 +12,8 @@ Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what'
    gate's controlled test surface — it is no longer a render/input mode.
 4. **AOV PNG stacks + z-buffer render** (`slicer.hpp` own tri-slicer + non-zero winding fill in
    `raster.hpp`; `render.hpp`). A render is written by default; the per-layer PNG stack is opt-in
-   via `--stack`. Any shader AOV rasterizes: `--aov Cout|N|disp|height`.
+   via `--stack`. Any shader AOV rasterizes: `--aov Cout|N|disp|height`. `--quad` renders a 2×2
+   contact sheet from four angles; `--white` (implied by `--quad`) uses a white background.
 5. **Procedural planet shader** (`shader.hpp`) — zero-dep; drives the gate.
 6. **OSL backend** (`osl.hpp`, option `PRINTMAN_OSL`) — real user OSL shaders drive it.
 7. **USD front-end** (`usd.hpp`/`usd_read.cpp` + `subdiv.hpp`, option `PRINTMAN_USD`) — loads a
@@ -29,6 +30,16 @@ Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what'
     for OIIO). Walk `diffuseColor` → `UsdUVTexture` → `file`; pull bytes via the USD asset resolver
     (`.usdz`-embedded or loose); decode with OIIO; sRGB→linear; sample per corner at `st`.
     Validated: Apple `teapot.usdz` (52k pts, PBR, Y-up) loads, stands upright, renders its baseColor.
+11. **Whole-scene load: every mesh, its own material + world transform** (`load_usd_scene`). Walks
+    all Mesh prims (skips proxy/guide/invisible), bakes each mesh's `ComputeLocalToWorldTransform`,
+    merges the amplified parts, drops the assembled model to the plate once. Material resolution is
+    sturdy: `ComputeSurface/DisplacementSource`, the `preview`/`full` binding purposes before
+    allPurpose, and a nested shading-group/GeomSubset-child fallback. Apple's 12-mesh robot prints
+    whole, in its real colours.
+12. **Multiple materials per mesh via `UsdGeomSubset`s.** A cage carries a material list + per-face
+    index; the tag rides through subdivision (CC/bilinear one child per corner, loop corner-then-
+    centre triangles), and each face is emitted with its own shader. Validated: a two-subset cube
+    slices with both colours (a gradient across the fill) and holds through 3 Catmull-Clark levels.
 
 ## Build
 
@@ -46,6 +57,7 @@ cmake --build build
 
 ```
 printman scene.usda --out out                              # render any USD (its own shaders/material)
+printman scene.usda --quad                                 # 2×2 contact sheet, four angles, white bg
 printman scene.usda --shaderdir <dir> --subdiv-level 3 --stack   # + the OSL shaders + slice stack
 printman --gate --bands 8                                  # band-invariance self-test
 ```
@@ -55,16 +67,15 @@ printman --gate --bands 8                                  # band-invariance sel
 1. **Per-band subdivision for the USD path.** `amplify_usd` materializes the whole refined cage
    (not memory-bounded). The gate/sphere path IS banded; port that structure to subdivided cages
    (dice only a band's faces + halo). Keep the gate green.
-2. **Mesh local-to-world transform.** The loader reads a mesh's *local* points; a parent Xform
-   (translate/rotate/scale) is ignored. Apply `ComputeLocalToWorldTransform` (composes cleanly with
-   the up-axis step). Not needed for origin-centred assets (earth, teapot); will bite on arbitrary scenes.
-3. **UV-seam displacement weld.** Per-corner displacement can crack at *non-periodic* UV seams
-   (earth is periodic, fine). Reference: the fork's per-face-average one-position-per-vertex weld.
-4. **Texture fidelity follow-ups** (`texshader.hpp`): honor the `st` transform (scale/bias/rotate),
+2. **UV-seam / material-boundary displacement weld.** Per-corner displacement can crack at
+   *non-periodic* UV seams (earth is periodic, fine), and a boundary between two subsets with
+   *different* displacement can gap (colour-only subsets are crack-free). Reference: the fork's
+   per-face-average one-position-per-vertex weld.
+3. **Texture fidelity follow-ups** (`texshader.hpp`): honor the `st` transform (scale/bias/rotate),
    wrap modes beyond repeat, and non-`st` primvar names. Albedo only by design (no roughness/metallic/normal).
-5. **Colour→filament is a sink/host step** (design §5): the core carries albedo RGB (Cout AOV);
+4. **Colour→filament is a sink/host step** (design §5): the core carries albedo RGB (Cout AOV);
    FDM dither/quantize + J55 tank separation are per-sink, not built.
-6. **Not started**: FDM contour export, J55 VoxelPrint bitmaps, resin `.sl1`, Orca/CuraEngine
+5. **Not started**: FDM contour export, J55 VoxelPrint bitmaps, resin `.sl1`, Orca/CuraEngine
    adapters, adaptive dicing, self-supporting clamp. See `DESIGN.md` §10–13.
 
 ## Vendored / copied
