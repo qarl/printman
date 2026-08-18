@@ -201,19 +201,12 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
         };
         double md = 0; for (const Shader* s : shaders[i]) md = std::max(md, s->max_reach());
         const std::string& sc = meshes[i].subdiv_scheme;
-        const bool poly = (sc == "none" || sc == "bilinear") && md > 0;
-        const bool adaptive = poly && all_quads(meshes[i]);
-        const bool uniform = (sc == "catmullClark") || (poly && !adaptive);
+        const bool poly = (sc == "none" || sc == "bilinear") && md > 0;   // polygon w/ displacement
         std::vector<LayerSegs> L;
-        if (adaptive) {
+        if (poly) {                                         // adaptive dice + displace (quads direct, tri/n-gon center-split)
             any_banded = true;
             int nb = std::max(1, usd_band_count(meshes[i], zs));
-            for (int f = 0; f < (int)meshes[i].counts.size(); ++f) {  // estimate tri count at slice tol
-                size_t o = 0; for (int g = 0; g < f; ++g) o += meshes[i].counts[g];
-                if (meshes[i].counts[f] != 4) continue;
-                auto el = [&](int c0, int c1){ const auto& a = meshes[i].points[meshes[i].indices[o+c0]]; const auto& b = meshes[i].points[meshes[i].indices[o+c1]]; double dx=a[0]-b[0],dy=a[1]-b[1],dz=a[2]-b[2]; return edge_segments(std::sqrt(dx*dx+dy*dy+dz*dz), slice_tol); };
-                unique_tri += (size_t)std::max(el(0,1), el(3,2)) * std::max(el(1,2), el(0,3)) * 2;
-            }
+            unique_tri += poly_tri_estimate(meshes[i], slice_tol);
             if (slice_tol == render_tol) {
                 nbands_total += nb;
                 L = amplify_poly_banded(meshes[i], shaders[i], slice_tol, zs, nb, renderhook, /*do_slice*/ true);
@@ -222,19 +215,18 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
                 L = amplify_poly_banded(meshes[i], shaders[i], slice_tol, zs, nb, {}, true);
                 amplify_poly_banded(meshes[i], shaders[i], render_tol, zs, nb, renderhook, /*do_slice*/ false);
             }
-        } else if (uniform) {
+        } else if (sc == "catmullClark") {                  // subdivision surface -> uniform-level band loop
             any_banded = true;
-            const std::string ds = (sc == "catmullClark") ? "catmullClark" : "bilinear";
             size_t corners = 0; for (int c : meshes[i].counts) corners += (size_t)c;
             unique_tri += (slice_level >= 1) ? corners * (size_t(1) << (2 * (slice_level - 1))) * 2 : corners - 2 * meshes[i].counts.size();
             int nb = std::max(1, usd_band_count(meshes[i], zs));
             if (slice_level == render_level) {
                 nbands_total += nb;
-                L = amplify_usd_banded(meshes[i], shaders[i], slice_level, zs, nb, renderhook, /*do_slice*/ true, ds);
+                L = amplify_usd_banded(meshes[i], shaders[i], slice_level, zs, nb, renderhook, /*do_slice*/ true);
             } else {
                 nbands_total += 2 * nb;
-                L = amplify_usd_banded(meshes[i], shaders[i], slice_level, zs, nb, {}, true, ds);
-                amplify_usd_banded(meshes[i], shaders[i], render_level, zs, nb, renderhook, /*do_slice*/ false, ds);
+                L = amplify_usd_banded(meshes[i], shaders[i], slice_level, zs, nb, {}, true);
+                amplify_usd_banded(meshes[i], shaders[i], render_level, zs, nb, renderhook, /*do_slice*/ false);
             }
         } else {
             size_t corners = 0; for (int c : meshes[i].counts) corners += (size_t)c;

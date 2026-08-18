@@ -171,13 +171,24 @@ inline int edge_segments(double len, double tol) {
     return 1 << L;
 }
 
-// ADAPTIVE bound-and-split for a quad polygon mesh (true REYES dicing): each control face dices to
-// its OWN edge scale, not one global level, so a fine face beside a coarse panel is not over-diced.
-// Crack-free by construction: each edge's segment count comes from the edge alone (shared faces
-// agree), boundary samples snap to it (coincident snaps make harmless degenerate triangles, never
-// hanging vertices), and per-control-vertex normals -- interpolated across the face -- match on
+// True if every face is a quad -- an all-quad mesh dices each face directly as a grid.
+inline bool all_quads(const UsdCage& uc) {
+    for (int c : uc.counts) if (c != 4) return false;
+    return !uc.counts.empty();
+}
+
+// ADAPTIVE bound-and-split for a POLYGON mesh (true REYES dicing): each control face dices to its
+// OWN edge scale, not one global level, so a fine face beside a coarse panel is not over-diced.
+// Quads dice directly as an (Ns x Nt) grid. Triangles and n-gons are center-split into one quad per
+// corner (face centroid + edge midpoints -- the first step of USD "bilinear"/Catmull-Clark
+// refinement) and each corner-quad dices through the SAME grid routine, so one path covers every
+// polygon. Crack-free by construction: every edge's segment count comes from the edge alone (a
+// shared original edge is halved identically from both sides, so neighbours agree), boundary samples
+// snap to it (coincident snaps make harmless degenerate triangles, never hanging vertices), and
+// per-control-vertex normals -- with edge-midpoint/centroid normals derived from them -- match on
 // shared edges so the DISPLACED boundary matches too. `tol` is the world facet target (bead width
-// for the slice, ~1px for the render). Quads only; non-quad meshes use the uniform bilinear path.
+// for the slice, ~1px for the render). A mesh dices uniformly: all-quad -> direct; any non-quad ->
+// center-split EVERY face, so a mixed quad/tri mesh stays crack-free across quad/tri boundaries too.
 inline std::vector<LayerSegs> amplify_poly_banded(const UsdCage& uc,
         const std::vector<const Shader*>& shaders, double tol,
         const std::vector<double>& zs, int nbands,
@@ -209,6 +220,7 @@ inline std::vector<LayerSegs> amplify_poly_banded(const UsdCage& uc,
     const std::vector<int> ctag = uc.face_material.empty() ? std::vector<int>(nf, 0) : uc.face_material;
     const int M = int(shaders.size());
     const bool hasuv = uc.st.size() == uc.indices.size();
+    const bool split = !all_quads(uc);   // any non-quad face -> center-split EVERY face for consistency
 
     for (int band = 0; band < nbands; ++band) {
         size_t g0 = (size_t)band*nz/nbands, g1 = (size_t)(band+1)*nz/nbands;
@@ -218,17 +230,10 @@ inline std::vector<LayerSegs> amplify_poly_banded(const UsdCage& uc,
         for (int m = 0; m < M; ++m) { parts[m].aov_names = shaders[m]->aov_names(); na[m]=int(parts[m].aov_names.size()); parts[m].aov.resize(na[m]); maxna=std::max(maxna,na[m]); }
         std::vector<V3> av(maxna);
 
-        for (int f = 0; f < nf; ++f) {
-            if (fhi[f] < zlo - max_disp || flo[f] > zhi + max_disp) continue;   // face not in this band
-            if (foff[f+1] - foff[f] != 4) continue;                            // adaptive path is quads only
-            int mi = (f < int(ctag.size())) ? ctag[f] : 0; if (mi < 0 || mi >= M) mi = 0;
-            Mesh& mm = parts[mi]; const Shader& sh = *shaders[mi]; const int nak = na[mi];
-            V3 P[4], Nc[4]; V2 UV[4];
-            for (int c = 0; c < 4; ++c) { int vid = uc.indices[foff[f]+c];
-                P[c] = {{uc.points[vid][0], uc.points[vid][1], uc.points[vid][2]}}; Nc[c] = vn[vid];
-                UV[c] = hasuv ? V2{{uc.st[foff[f]+c][0], uc.st[foff[f]+c][1]}} : V2{{0, 0}}; }
+        // Dice one quad to its own per-edge scale, displace+shade each sample, emit tris into mm.
+        // Corners in grid order: edge 0 bottom P0P1 (s), 1 right P1P2 (t), 2 top P3P2 (s), 3 left P0P3 (t).
+        auto dice_quad = [&](Mesh& mm, const Shader& sh, int nak, const V3 P[4], const V3 Nc[4], const V2 UV[4]) {
             auto elen = [&](int a, int b){ double dx=P[a][0]-P[b][0],dy=P[a][1]-P[b][1],dz=P[a][2]-P[b][2]; return std::sqrt(dx*dx+dy*dy+dz*dz); };
-            // edges: 0 bottom P0P1 (s), 1 right P1P2 (t), 2 top P3P2 (s), 3 left P0P3 (t)
             const int s0 = edge_segments(elen(0,1), tol), s2 = edge_segments(elen(3,2), tol);
             const int t1 = edge_segments(elen(1,2), tol), t3 = edge_segments(elen(0,3), tol);
             const int Ns = std::max(s0, s2), Nt = std::max(t1, t3);
@@ -264,6 +269,47 @@ inline std::vector<LayerSegs> amplify_poly_banded(const UsdCage& uc,
                 std::uint32_t c = idx[(size_t)(j+1)*(Ns+1)+i+1], dd = idx[(size_t)(j+1)*(Ns+1)+i];
                 mm.tri.push_back({a, b, c}); mm.tri.push_back({a, c, dd});
             }
+        };
+
+        for (int f = 0; f < nf; ++f) {
+            if (fhi[f] < zlo - max_disp || flo[f] > zhi + max_disp) continue;   // face not in this band
+            const int aoff = foff[f], cnt = foff[f+1] - aoff;
+            if (cnt < 3) continue;                                             // degenerate face
+            int mi = (f < int(ctag.size())) ? ctag[f] : 0; if (mi < 0 || mi >= M) mi = 0;
+            Mesh& mm = parts[mi]; const Shader& sh = *shaders[mi]; const int nak = na[mi];
+            auto corner = [&](int c, V3& P, V3& N, V2& U){ int vid = uc.indices[aoff+c];
+                P = {{uc.points[vid][0], uc.points[vid][1], uc.points[vid][2]}}; N = vn[vid];
+                U = hasuv ? V2{{uc.st[aoff+c][0], uc.st[aoff+c][1]}} : V2{{0, 0}}; };
+            if (!split && cnt == 4) {                       // quad in an all-quad mesh: dice directly
+                V3 P[4], Nc[4]; V2 UV[4];
+                for (int c = 0; c < 4; ++c) corner(c, P[c], Nc[c], UV[c]);
+                dice_quad(mm, sh, nak, P, Nc, UV);
+            } else {                                        // tri / n-gon (or any face once split): center-split
+                std::vector<V3> Cp(cnt), Cn(cnt); std::vector<V2> Cuv(cnt);
+                V3 Fp{{0,0,0}}, Fn{{0,0,0}}; V2 Fuv{{0,0}};
+                for (int c = 0; c < cnt; ++c) { corner(c, Cp[c], Cn[c], Cuv[c]);
+                    Fp[0]+=Cp[c][0]; Fp[1]+=Cp[c][1]; Fp[2]+=Cp[c][2];
+                    Fn[0]+=Cn[c][0]; Fn[1]+=Cn[c][1]; Fn[2]+=Cn[c][2];
+                    Fuv[0]+=Cuv[c][0]; Fuv[1]+=Cuv[c][1]; }
+                Fp[0]/=cnt; Fp[1]/=cnt; Fp[2]/=cnt; Fuv[0]/=cnt; Fuv[1]/=cnt;
+                { double l=std::sqrt(Fn[0]*Fn[0]+Fn[1]*Fn[1]+Fn[2]*Fn[2]); if (l>1e-12){Fn[0]/=l;Fn[1]/=l;Fn[2]/=l;} }
+                // Edge midpoints (position/normal/uv) -- derived from the two endpoints alone, so a
+                // shared original edge yields the SAME midpoint from either face (order-independent).
+                std::vector<V3> Emp(cnt), Emn(cnt); std::vector<V2> Emuv(cnt);
+                for (int e = 0; e < cnt; ++e) { int e1 = (e+1)%cnt;
+                    Emp[e] = {{0.5*(Cp[e][0]+Cp[e1][0]), 0.5*(Cp[e][1]+Cp[e1][1]), 0.5*(Cp[e][2]+Cp[e1][2])}};
+                    Emn[e] = {{Cn[e][0]+Cn[e1][0], Cn[e][1]+Cn[e1][1], Cn[e][2]+Cn[e1][2]}};
+                    double l=std::sqrt(Emn[e][0]*Emn[e][0]+Emn[e][1]*Emn[e][1]+Emn[e][2]*Emn[e][2]); if (l>1e-12){Emn[e][0]/=l;Emn[e][1]/=l;Emn[e][2]/=l;}
+                    Emuv[e] = {{0.5*(Cuv[e][0]+Cuv[e1][0]), 0.5*(Cuv[e][1]+Cuv[e1][1])}};
+                }
+                // one quad per corner: [corner k, mid of edge k, centroid, mid of edge k-1]
+                for (int k = 0; k < cnt; ++k) { int kp = (k+cnt-1)%cnt;
+                    V3 P[4]  = {Cp[k],  Emp[k],  Fp,  Emp[kp]};
+                    V3 Nc[4] = {Cn[k],  Emn[k],  Fn,  Emn[kp]};
+                    V2 UV[4] = {Cuv[k], Emuv[k], Fuv, Emuv[kp]};
+                    dice_quad(mm, sh, nak, P, Nc, UV);
+                }
+            }
         }
         Mesh bm = (M == 1) ? std::move(parts[0]) : merge_meshes(parts);
         if (do_slice) { std::vector<double> bandzs(zs.begin()+g0, zs.begin()+g1); auto segs = slice_mesh(bm, bandzs); for (size_t k=0;k<segs.size();++k) out[g0+k]=std::move(segs[k]); }
@@ -272,10 +318,38 @@ inline std::vector<LayerSegs> amplify_poly_banded(const UsdCage& uc,
     return out;
 }
 
-// True if every face is a quad -- the adaptive polygon path handles quads only.
-inline bool all_quads(const UsdCage& uc) {
-    for (int c : uc.counts) if (c != 4) return false;
-    return !uc.counts.empty();
+// Estimate of the micropolygon-triangle count amplify_poly_banded emits at tolerance `tol` (a
+// single-band count, for the CLI stat line). Mirrors the dicing: all-quad -> one grid per face;
+// else one grid per corner-quad of every center-split face.
+inline size_t poly_tri_estimate(const UsdCage& uc, double tol) {
+    const int nf = int(uc.counts.size());
+    if (nf == 0) return 0;
+    std::vector<int> foff(nf + 1, 0);
+    for (int f = 0; f < nf; ++f) foff[f + 1] = foff[f] + uc.counts[f];
+    const bool split = !all_quads(uc);
+    auto plen = [&](const V3& a, const V3& b){ double dx=a[0]-b[0],dy=a[1]-b[1],dz=a[2]-b[2]; return std::sqrt(dx*dx+dy*dy+dz*dz); };
+    auto pt = [&](int c)->V3{ const auto& p = uc.points[uc.indices[c]]; return V3{{p[0],p[1],p[2]}}; };
+    size_t tris = 0;
+    for (int f = 0; f < nf; ++f) {
+        const int a = foff[f], cnt = foff[f+1] - a;
+        if (cnt < 3) continue;
+        if (!split) {
+            int s0 = edge_segments(plen(pt(a+0),pt(a+1)), tol), s2 = edge_segments(plen(pt(a+3),pt(a+2)), tol);
+            int t1 = edge_segments(plen(pt(a+1),pt(a+2)), tol), t3 = edge_segments(plen(pt(a+0),pt(a+3)), tol);
+            tris += (size_t)std::max(s0,s2)*std::max(t1,t3)*2;
+        } else {
+            V3 F{{0,0,0}}; for (int c = 0; c < cnt; ++c) { V3 p = pt(a+c); F[0]+=p[0]; F[1]+=p[1]; F[2]+=p[2]; }
+            F[0]/=cnt; F[1]/=cnt; F[2]/=cnt;
+            auto mid = [&](int i, int j){ V3 p = pt(a+i), q = pt(a+j); return V3{{0.5*(p[0]+q[0]),0.5*(p[1]+q[1]),0.5*(p[2]+q[2])}}; };
+            for (int k = 0; k < cnt; ++k) { int kp = (k+cnt-1)%cnt, kn = (k+1)%cnt;
+                V3 Ck = pt(a+k), Emk = mid(k,kn), Emp = mid(kp,k);
+                int s0 = edge_segments(plen(Ck,Emk), tol), s2 = edge_segments(plen(Emp,F), tol);
+                int t1 = edge_segments(plen(Emk,F), tol), t3 = edge_segments(plen(Ck,Emp), tol);
+                tris += (size_t)std::max(s0,s2)*std::max(t1,t3)*2;
+            }
+        }
+    }
+    return tris;
 }
 
 }  // namespace printman

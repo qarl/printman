@@ -56,12 +56,16 @@ Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what'
     fixed `--subdiv-level N` overrides both. Layer width and bead width are genuinely different scales.
 16. **Displacement on polygon meshes, RenderMan-style** (`subdivisionScheme = none`/`bilinear` with a
     displacement shader) — non-subdiv polygons are **diced into micropolygons and displaced**, not left
-    flat. **Quad meshes dice adaptively** (`amplify_poly_banded`): each face splits to its own edge
+    flat. **Every polygon dices adaptively** (`amplify_poly_banded`): each face splits to its own edge
     scale (`edge_segments(len, tol)`), crack-free — segment counts are **edge-intrinsic** so shared
     edges agree, boundary params snap to the shared count, and per-control-vertex normals are shared
-    across faces so a displaced boundary matches on both sides. Verified watertight on a 2/18/20 mm quad
-    strip (thin quad diced 8×64, wide 64×64, no gaps). Non-quad polygons use a **uniform bilinear** band
-    loop.
+    across faces so a displaced boundary matches on both sides. Quads dice directly as an (Ns×Nt) grid;
+    **triangles and n-gons are center-split** into one quad per corner (centroid + edge midpoints, the
+    first step of USD bilinear/Catmull-Clark refinement) and diced by the same routine — a shared
+    original edge is halved identically from both sides, so the seam still matches. A mesh dices
+    uniformly (all-quad → direct; any non-quad → center-split every face, so mixed quad/tri stays
+    crack-free too). Verified watertight on a 2/18/20 mm quad strip and on triangle/pentagon/mixed
+    cases: the odd-count (boundary) edges trace the outline exactly, no interior gaps.
 
 ## Build
 
@@ -89,22 +93,18 @@ printman scene.usda --gate --bands 8                       # USD band-invariance
 
 ## NEXT (in priority order — do NOT start mid-context; these are fresh units)
 
-1. **Adaptive dicing for triangle / n-gon polygon meshes.** Today only all-quad polygon meshes dice
-   adaptively; triangle/n-gon meshes fall back to a uniform bilinear level. Barycentric adaptive
-   tessellation with the same crack-free discipline (edge-intrinsic segment counts, shared vertex
-   normals, boundary snapping).
-2. **Adaptive dicing for Catmull-Clark surfaces.** CC cages currently dice at one uniform level per
+1. **Adaptive dicing for Catmull-Clark surfaces.** CC cages currently dice at one uniform level per
    output. True adaptive CC needs arbitrary-(u,v) limit-surface evaluation (OpenSubdiv-style) so each
-   face refines to its own screen/bead scale — a bigger piece than the quad tessellator.
-3. **UV-seam / material-boundary displacement weld.** Per-corner displacement can crack at
+   face refines to its own screen/bead scale — a bigger piece than the polygon tessellator.
+2. **UV-seam / material-boundary displacement weld.** Per-corner displacement can crack at
    *non-periodic* UV seams (earth is periodic, fine), and a boundary between two subsets with
    *different* displacement can gap (colour-only subsets are crack-free). Reference: the fork's
    per-face-average one-position-per-vertex weld.
-4. **Texture fidelity follow-ups** (`texshader.hpp`): honor the `st` transform (scale/bias/rotate),
+3. **Texture fidelity follow-ups** (`texshader.hpp`): honor the `st` transform (scale/bias/rotate),
    wrap modes beyond repeat, and non-`st` primvar names. Albedo only by design (no roughness/metallic/normal).
-5. **Colour→filament is a sink/host step** (design §5): the core carries albedo RGB (Cout AOV);
+4. **Colour→filament is a sink/host step** (design §5): the core carries albedo RGB (Cout AOV);
    FDM dither/quantize + J55 tank separation are per-sink, not built.
-6. **Not started**: FDM contour export, J55 VoxelPrint bitmaps, resin `.sl1`, Orca/CuraEngine
+5. **Not started**: FDM contour export, J55 VoxelPrint bitmaps, resin `.sl1`, Orca/CuraEngine
    adapters, self-supporting clamp. See `DESIGN.md` §10–13.
 
 ## Vendored / copied
