@@ -10,14 +10,9 @@
 
 namespace printman {
 
-struct UsdCage {
-    std::vector<std::array<double, 3>> points;
-    std::vector<int> counts;    // per-face vertex count
-    std::vector<int> indices;   // face-vertex indices (CSR w/ counts)
-    std::vector<std::array<double, 2>> st;  // face-varying UV, parallel to indices (empty if none)
-    std::string subdiv_scheme = "catmullClark";
-    std::string up_axis = "Z";   // stage upAxis as authored; points below are already Z-up normalized
-    // material (from the bound UsdShadeMaterial, if present)
+// One resolved material. A mesh can bind several through UsdGeomSubsets (materialBind family), so a
+// cage carries a list of these plus a per-face index into it.
+struct UsdMaterial {
     std::string osl_disp;       // info:id of the displacement shader
     std::string osl_color;      // info:id of the surface shader
     double max_magnitude = 0;   // inputs:printman:maxMagnitude
@@ -29,6 +24,19 @@ struct UsdCage {
     std::vector<unsigned char> diffuse_tex;
     std::string diffuse_tex_name;          // asset basename -- gives OIIO the format (extension)
     bool diffuse_tex_srgb = true;          // decode sRGB->linear on read (false if sourceColorSpace=raw)
+};
+
+struct UsdCage {
+    std::vector<std::array<double, 3>> points;
+    std::vector<int> counts;    // per-face vertex count
+    std::vector<int> indices;   // face-vertex indices (CSR w/ counts)
+    std::vector<std::array<double, 2>> st;  // face-varying UV, parallel to indices (empty if none)
+    std::string subdiv_scheme = "catmullClark";
+    std::string up_axis = "Z";   // stage upAxis as authored; points below are already Z-up normalized
+    // Materials bound to this mesh (index 0 is the mesh-level default), and a per-face index into
+    // them (empty -> every face uses material 0). Subsets refine per-face; index 0 covers the rest.
+    std::vector<UsdMaterial> materials;
+    std::vector<int> face_material;         // size counts.size() when subsets exist, else empty
 };
 
 // Load every renderable Mesh prim (each with its own bound material) from a USD file, as a vector

@@ -17,6 +17,7 @@
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
+#include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xformable.h>
 #include <pxr/usd/usdShade/connectableAPI.h>
@@ -29,26 +30,24 @@ namespace printman {
 
 namespace {
 
-// Resolve the cage's albedo from the bound material, per USD convention: our displacement/surface
-// shader info:ids for the OSL path; else a diffuseColor texture (bytes pulled through the asset
-// resolver) or constant; else primvars:displayColor; else the 0.18 neutral gray default.
-void read_material(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& meshPrim,
-                   const pxr::UsdGeomPrimvarsAPI& pv, UsdCage& out) {
+// Resolve the material bound directly to a prim (a mesh, or a materialBind GeomSubset), trying the
+// "preview"/"full" purposes before allPurpose -- Maya/pxr exports (Apple's) bind that way.
+pxr::UsdShadeMaterial resolve_direct(const pxr::UsdPrim& p) {
+    using namespace pxr;
+    UsdShadeMaterialBindingAPI b(p);
+    UsdShadeMaterial m = b.ComputeBoundMaterial(UsdShadeTokens->preview);
+    if (!m) m = b.ComputeBoundMaterial(UsdShadeTokens->full);
+    if (!m) m = b.ComputeBoundMaterial();
+    return m;
+}
+
+// Fill a UsdMaterial from a resolved UsdShadeMaterial, per the USD convention ladder: our
+// displacement/surface shader info:ids for the OSL path; else a diffuseColor texture (bytes pulled
+// through the asset resolver) or constant; else the mesh's displayColor; else the 0.18 gray.
+void extract_material(const pxr::UsdStageRefPtr& stage, const pxr::UsdShadeMaterial& mat,
+                      const pxr::UsdGeomPrimvar& displayColor, UsdMaterial& out) {
     using namespace pxr;
     UsdShadeShader surf;
-    // Resolve the bound material, trying the "preview"/"full" purposes before allPurpose (Maya/pxr
-    // exports bind that way). Some exports (Apple's robot) carry the binding on a nested shading-
-    // group / GeomSubset child of the mesh rather than the mesh itself, so fall back to descendants.
-    // (One material per mesh; per-face-subset materials would need per-corner assignment -- later.)
-    auto resolve = [](const UsdPrim& p) -> UsdShadeMaterial {
-        UsdShadeMaterialBindingAPI b(p);
-        UsdShadeMaterial m = b.ComputeBoundMaterial(UsdShadeTokens->preview);
-        if (!m) m = b.ComputeBoundMaterial(UsdShadeTokens->full);
-        if (!m) m = b.ComputeBoundMaterial();
-        return m;
-    };
-    UsdShadeMaterial mat = resolve(meshPrim);
-    if (!mat) for (const UsdPrim& ch : meshPrim.GetDescendants()) { mat = resolve(ch); if (mat) break; }
     if (mat) {
         auto idOf = [](const UsdShadeShader& s) -> std::string {
             if (!s) return "";
@@ -67,8 +66,6 @@ void read_material(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& meshPri
         }
     }
 
-
-    UsdGeomPrimvar dc = pv.GetPrimvar(TfToken("displayColor"));
     VtVec3fArray dcv;
     bool color_from_surface = false;
     if (surf) {
@@ -108,8 +105,46 @@ void read_material(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& meshPri
     }
     // displayColor is USD's fallback color for an unshaded gprim: use it only when the bound
     // surface gave us neither a texture nor a constant diffuseColor. Else the 0.18 default stands.
-    if (out.diffuse_tex.empty() && !color_from_surface && dc && dc.Get(&dcv) && !dcv.empty())
+    if (out.diffuse_tex.empty() && !color_from_surface && displayColor && displayColor.Get(&dcv) && !dcv.empty())
         out.fallback_color = {dcv[0][0], dcv[0][1], dcv[0][2]};
+}
+
+// Fill a cage's materials + per-face material index. Each materialBind GeomSubset contributes a
+// material and claims its faces. Faces in no subset fall to a default material (the mesh's direct
+// binding, or a descendant's for exports that bind on a nested shading-group child). A mesh with no
+// subsets, or one whose subsets cover every face (Apple's), ends up with a single clean material.
+void read_materials(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& meshPrim,
+                    const pxr::UsdGeomPrimvar& displayColor, UsdCage& out) {
+    using namespace pxr;
+    std::vector<UsdGeomSubset> subs = UsdShadeMaterialBindingAPI(meshPrim).GetMaterialBindSubsets();
+    if (subs.empty()) {
+        UsdShadeMaterial m0 = resolve_direct(meshPrim);
+        if (!m0) for (const UsdPrim& ch : meshPrim.GetDescendants()) { m0 = resolve_direct(ch); if (m0) break; }
+        out.materials.emplace_back();
+        extract_material(stage, m0, displayColor, out.materials[0]);
+        return;
+    }
+    out.face_material.assign(out.counts.size(), -1);
+    for (const UsdGeomSubset& sub : subs) {
+        UsdShadeMaterial sm = resolve_direct(sub.GetPrim());
+        if (!sm) continue;
+        int idx = int(out.materials.size());
+        out.materials.emplace_back();
+        extract_material(stage, sm, displayColor, out.materials[idx]);
+        VtIntArray fidx; sub.GetIndicesAttr().Get(&fidx);
+        for (int fi : fidx) if (fi >= 0 && fi < int(out.face_material.size())) out.face_material[fi] = idx;
+    }
+    // Faces no subset claimed (or all faces, if no subset resolved) get a default material.
+    bool uncovered = false;
+    for (int f : out.face_material) if (f < 0) { uncovered = true; break; }
+    if (uncovered) {
+        int didx = int(out.materials.size());
+        UsdShadeMaterial dm = resolve_direct(meshPrim);
+        if (!dm) for (const UsdPrim& ch : meshPrim.GetDescendants()) { dm = resolve_direct(ch); if (dm) break; }
+        out.materials.emplace_back();
+        extract_material(stage, dm, displayColor, out.materials[didx]);
+        for (int& f : out.face_material) if (f < 0) f = didx;
+    }
 }
 
 // Read one Mesh prim into a cage: points baked to world space (its local-to-world transform) and
@@ -149,7 +184,7 @@ bool read_mesh(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& prim, bool 
         else { out.st.reserve(vals.size()); for (const auto& v : vals) out.st.push_back({v[0], v[1]}); }
     }
 
-    read_material(stage, prim, pv, out);
+    read_materials(stage, prim, pv.GetPrimvar(TfToken("displayColor")), out);
     return true;
 }
 
