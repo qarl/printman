@@ -70,57 +70,77 @@ void write_stack_and_render(const Mesh& m, const std::vector<LayerSegs>& layers,
 }
 
 #ifdef PRINTMAN_USD
-int run_usd(const std::string& usd_in, const std::string& out, const std::string& aovname,
-            double layer, double ppm, int subdiv_level, const std::string& shaderdir,
-            const std::string& osl_disp, const std::string& osl_color, double reach, double amp, bool stack) {
-    UsdCage uc; std::string err;
-    if (!load_usd_cage(usd_in, PRINTMAN_USD_PLUGINDIR, uc, err)) { std::fprintf(stderr, "printman: %s\n", err.c_str()); return 1; }
-    std::printf("printman: loaded %s -- %zu points, %zu faces, uv=%s, scheme=%s, upAxis=%s%s\n", usd_in.c_str(),
-                uc.points.size(), uc.counts.size(), uc.st.empty() ? "no" : "yes", uc.subdiv_scheme.c_str(),
-                uc.up_axis.c_str(), uc.up_axis == "Y" ? " (rotated to Z-up)" : "");
-    std::unique_ptr<Shader> shp;
+enum class ShaderKind { Osl, Texture, Flat };
+
+// Pick the shader for one mesh's bound material, following the USD convention ladder: our OSL
+// shader (only if its .oso exists) -> a diffuseColor texture -> the flat convention colour.
+std::unique_ptr<Shader> make_shader(const UsdCage& uc, const std::string& shaderdir,
+                                    const std::string& osl_disp, const std::string& osl_color,
+                                    double reach, ShaderKind& kind) {
 #ifdef PRINTMAN_OSL
-    std::string dn = !osl_disp.empty() ? osl_disp : uc.osl_disp, cn = !osl_color.empty() ? osl_color : uc.osl_color;
-    // Only treat the material as ours if a compiled .oso is actually present -- otherwise it names
-    // a shader PrintMan can't evaluate (UsdPreviewSurface, a renderer-specific shader, ...), which
-    // per USD convention is not an error: we fall back below rather than provoke an OSL load error.
+    std::string dn = !osl_disp.empty() ? osl_disp : uc.osl_disp;
+    std::string cn = !osl_color.empty() ? osl_color : uc.osl_color;
     auto has_oso = [&](const std::string& n) {
         return !n.empty() && std::filesystem::exists(shaderdir + "/" + n + ".oso");
     };
     if ((dn.empty() || has_oso(dn)) && (cn.empty() || has_oso(cn)) && (!dn.empty() || !cn.empty())) {
         double rr = reach > 0 ? reach : (uc.max_magnitude > 0 ? uc.max_magnitude : 10);
         try {
-            shp = std::make_unique<OslShader>(shaderdir, dn, cn, rr);
-            std::printf("printman: OSL disp='%s' color='%s' reach=%g\n", dn.c_str(), cn.c_str(), rr);
+            auto s = std::make_unique<OslShader>(shaderdir, dn, cn, rr);
+            std::printf("printman: mesh uses OSL disp='%s' color='%s' reach=%g\n", dn.c_str(), cn.c_str(), rr);
+            kind = ShaderKind::Osl;
+            return s;
         } catch (const std::exception& e) {
             std::fprintf(stderr, "printman: material '%s'/'%s' not an OSL shader (%s)\n", dn.c_str(), cn.c_str(), e.what());
         }
     }
+    if (!uc.diffuse_tex.empty()) {
+        auto ts = std::make_unique<TextureShader>(uc.diffuse_tex, uc.diffuse_tex_name, uc.diffuse_tex_srgb);
+        if (ts->ok()) {
+            std::printf("printman: mesh uses diffuseColor texture '%s' (%dx%d)\n", uc.diffuse_tex_name.c_str(), ts->W, ts->H);
+            kind = ShaderKind::Texture;
+            return ts;
+        }
+        std::fprintf(stderr, "printman: could not decode diffuseColor texture '%s'; using flat colour\n", uc.diffuse_tex_name.c_str());
+    }
 #else
     (void)shaderdir; (void)osl_disp; (void)osl_color; (void)reach;
 #endif
+    auto fl = std::make_unique<FlatShader>();
+    fl->color = {uc.fallback_color[0], uc.fallback_color[1], uc.fallback_color[2]};
+    kind = ShaderKind::Flat;
+    return fl;
+}
+
+int run_usd(const std::string& usd_in, const std::string& out, const std::string& aovname,
+            double layer, double ppm, int subdiv_level, const std::string& shaderdir,
+            const std::string& osl_disp, const std::string& osl_color, double reach, double amp, bool stack) {
     (void)amp;
-#ifdef PRINTMAN_OSL
-    if (!shp && !uc.diffuse_tex.empty()) {
-        auto ts = std::make_unique<TextureShader>(uc.diffuse_tex, uc.diffuse_tex_name, uc.diffuse_tex_srgb);
-        if (ts->ok()) {
-            std::printf("printman: no PrintMan shader; UsdPreviewSurface diffuseColor texture '%s' (%dx%d), no displacement\n",
-                        uc.diffuse_tex_name.c_str(), ts->W, ts->H);
-            shp = std::move(ts);
-        } else {
-            std::fprintf(stderr, "printman: could not decode diffuseColor texture '%s'; using flat colour\n", uc.diffuse_tex_name.c_str());
-        }
+    std::vector<UsdCage> meshes; std::string err; int skipped = 0;
+    if (!load_usd_scene(usd_in, PRINTMAN_USD_PLUGINDIR, meshes, skipped, err)) { std::fprintf(stderr, "printman: %s\n", err.c_str()); return 1; }
+    size_t np = 0, nf = 0; for (const auto& u : meshes) { np += u.points.size(); nf += u.counts.size(); }
+    const std::string& up = meshes.front().up_axis;
+    char sk[64] = ""; if (skipped) std::snprintf(sk, sizeof(sk), ", skipped %d proxy/guide/hidden", skipped);
+    std::printf("printman: loaded %s -- %zu mesh(es), %zu points, %zu faces, upAxis=%s%s%s\n",
+                usd_in.c_str(), meshes.size(), np, nf, up.c_str(),
+                up == "Y" ? " (rotated to Z-up)" : "", sk);
+
+    // Amplify each mesh with its own material's shader, then merge the parts into one model.
+    std::vector<Mesh> parts; parts.reserve(meshes.size());
+    int nosl = 0, ntex = 0, nflat = 0;
+    for (const auto& u : meshes) {
+        ShaderKind kind = ShaderKind::Flat;
+        auto shp = make_shader(u, shaderdir, osl_disp, osl_color, reach, kind);
+        (kind == ShaderKind::Osl ? nosl : kind == ShaderKind::Texture ? ntex : nflat)++;
+        parts.push_back(amplify_usd(u, *shp, subdiv_level));
     }
-#endif
-    if (!shp) {
-        auto fl = std::make_unique<FlatShader>();
-        fl->color = {uc.fallback_color[0], uc.fallback_color[1], uc.fallback_color[2]};
-        std::printf("printman: no PrintMan shader; USD fallback color (%.3g %.3g %.3g), no displacement\n",
-                    uc.fallback_color[0], uc.fallback_color[1], uc.fallback_color[2]);
-        shp = std::move(fl);
-    }
-    Mesh m = amplify_usd(uc, *shp, subdiv_level);
-    if (m.aov_names.empty()) { std::fprintf(stderr, "printman: shader produced no AOVs\n"); return 1; }
+    if (meshes.size() > 1)
+        std::printf("printman: %zu meshes -- %d OSL, %d textured, %d flat (no displacement on non-OSL parts)\n",
+                    meshes.size(), nosl, ntex, nflat);
+    Mesh m = merge_meshes(parts);
+    drop_to_plate(m);
+    if (m.pos.empty() || m.aov_names.empty()) { std::fprintf(stderr, "printman: nothing to slice\n"); return 1; }
+
     int aovk = -1; for (size_t k = 0; k < m.aov_names.size(); ++k) if (m.aov_names[k] == aovname) aovk = (int)k;
     if (aovk < 0) { std::fprintf(stderr, "printman: aov '%s' not found, using '%s'\n", aovname.c_str(), m.aov_names[0].c_str()); aovk = 0; }
     bool srgb = (m.aov_names[aovk] == "Cout");

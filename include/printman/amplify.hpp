@@ -62,8 +62,37 @@ inline Mesh amplify_usd(const UsdCage& uc, const Shader& sh, int level) {
         int a = r.foff[f], b = r.foff[f + 1];
         for (int i = a + 1; i + 1 < b; ++i) { auto v0 = emit(a); auto v1 = emit(i); auto v2 = emit(i + 1); m.tri.push_back({v0, v1, v2}); }
     }
-    float zmin = 1e30f; for (auto& p : m.pos) zmin = std::min(zmin, p[2]); for (auto& p : m.pos) p[2] -= zmin;
-    return m;
+    return m;  // world-space; the caller drops the assembled model to the plate once (see below)
+}
+
+// Concatenate amplified parts into one mesh. A multi-mesh model's parts each carry their own
+// shader's AOVs; align by name on the first part's schema (missing channels -> 0) so at least
+// Cout survives across parts. Triangle indices are rebased per part.
+inline Mesh merge_meshes(const std::vector<Mesh>& parts) {
+    Mesh out;
+    for (const Mesh& p : parts) if (!p.aov_names.empty()) { out.aov_names = p.aov_names; break; }
+    out.aov.resize(out.aov_names.size());
+    for (const Mesh& p : parts) {
+        std::uint32_t base = (std::uint32_t)out.pos.size();
+        out.pos.insert(out.pos.end(), p.pos.begin(), p.pos.end());
+        out.nrm.insert(out.nrm.end(), p.nrm.begin(), p.nrm.end());
+        out.uv.insert(out.uv.end(), p.uv.begin(), p.uv.end());
+        for (std::size_t k = 0; k < out.aov_names.size(); ++k) {
+            int src = p.aov_index(out.aov_names[k]);
+            if (src >= 0) out.aov[k].insert(out.aov[k].end(), p.aov[src].begin(), p.aov[src].end());
+            else out.aov[k].resize(out.aov[k].size() + p.pos.size(), {0, 0, 0});
+        }
+        for (const auto& t : p.tri) out.tri.push_back({t[0] + base, t[1] + base, t[2] + base});
+    }
+    return out;
+}
+
+// Sit the model on the build plate (z=0). Done once, on the assembled model, so parts keep their
+// relative heights (dropping each part independently would flatten them all onto the plate).
+inline void drop_to_plate(Mesh& m) {
+    float zmin = 1e30f;
+    for (const auto& p : m.pos) zmin = std::min(zmin, p[2]);
+    if (zmin < 1e30f) for (auto& p : m.pos) p[2] -= zmin;
 }
 
 }  // namespace printman

@@ -31,8 +31,11 @@ struct UsdCage {
     bool diffuse_tex_srgb = true;          // decode sRGB->linear on read (false if sourceColorSpace=raw)
 };
 
-// Load the first Mesh prim (+ its bound material) from a USD file. plugin_dir is the OpenUSD
-// plugInfo tree to register. Returns false with err set on failure.
-bool load_usd_cage(const std::string& path, const std::string& plugin_dir, UsdCage& out, std::string& err);
+// Load every renderable Mesh prim (each with its own bound material) from a USD file, as a vector
+// of cages. Each cage's points are already baked to world space and normalized to Z-up. Skipped
+// counts proxy/guide/invisible prims that were dropped. plugin_dir is the OpenUSD plugInfo tree to
+// register. Returns false with err set on failure (including a stage with no printable mesh).
+bool load_usd_scene(const std::string& path, const std::string& plugin_dir,
+                    std::vector<UsdCage>& out, int& skipped, std::string& err);
 
 }  // namespace printman
