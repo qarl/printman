@@ -14,6 +14,7 @@
 #endif
 #ifdef PRINTMAN_USD
 #include "printman/amplify.hpp"
+#include "printman/band_usd.hpp"
 #include "printman/usd.hpp"
 #endif
 #include "printman/png.hpp"
@@ -50,6 +51,17 @@ Frame window_of(const Mesh& m, double ppm, int pad) {
     for (auto& p : m.pos) { x0 = std::min(x0, (double)p[0]); x1 = std::max(x1, (double)p[0]); y0 = std::min(y0, (double)p[1]); y1 = std::max(y1, (double)p[1]); }
     Frame fr; fr.ppm = ppm; fr.xmin = x0 - pad / ppm; fr.ymin = y0 - pad / ppm;
     fr.W = (int)std::ceil((x1 - x0) * ppm) + 2 * pad; fr.H = (int)std::ceil((y1 - y0) * ppm) + 2 * pad;
+    fr.rgb.assign((size_t)fr.W * fr.H * 3, 0);
+    return fr;
+}
+
+Frame window_for(double xspan, double yspan, double cx, double cy, double ppm, int pad) {
+    Frame fr;
+    fr.ppm = ppm;
+    fr.W = (int)std::ceil(xspan * ppm) + 2 * pad;
+    fr.H = (int)std::ceil(yspan * ppm) + 2 * pad;
+    fr.xmin = cx - xspan / 2 - pad / ppm;
+    fr.ymin = cy - yspan / 2 - pad / ppm;
     fr.rgb.assign((size_t)fr.W * fr.H * 3, 0);
     return fr;
 }
@@ -160,18 +172,50 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
     write_stack_and_render(m, layers, win, aovk, srgb, out, aovname, stack, quad, bg);
     return 0;
 }
+
+// USD REYES gate: slice the first mesh's banded path at band-count=1 and band-count=N and prove the
+// per-layer Cout rasters are pixel-identical -- the memory-bounded band loop must not change output.
+int run_usd_gate(const std::string& usd_in, const std::string& shaderdir, const std::string& osl_disp,
+                 const std::string& osl_color, double reach, double layer, double ppm, int subdiv_level, int bands) {
+    std::vector<UsdCage> meshes; std::string err; int skipped = 0;
+    if (!load_usd_scene(usd_in, PRINTMAN_USD_PLUGINDIR, meshes, skipped, err)) { std::fprintf(stderr, "printman: %s\n", err.c_str()); return 1; }
+    const UsdCage& uc = meshes.front();
+    if (uc.subdiv_scheme != "catmullClark") { std::fprintf(stderr, "printman: gate needs a catmullClark mesh (got '%s')\n", uc.subdiv_scheme.c_str()); return 1; }
+
+    std::vector<std::unique_ptr<Shader>> owned;
+    std::vector<const Shader*> shaders;
+    for (const UsdMaterial& mtl : uc.materials) {
+        ShaderKind kind = ShaderKind::Flat;
+        owned.push_back(make_shader(mtl, shaderdir, osl_disp, osl_color, reach, kind));
+        shaders.push_back(owned.back().get());
+    }
+    int cout_k = 0; { auto an = shaders[0]->aov_names(); for (size_t k = 0; k < an.size(); ++k) if (an[k] == "Cout") cout_k = (int)k; }
+
+    double max_disp = 0; for (const Shader* s : shaders) max_disp = std::max(max_disp, s->max_reach());
+    double zmin = 1e30, zmax = -1e30, x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
+    for (const auto& p : uc.points) { zmin = std::min(zmin, p[2]); zmax = std::max(zmax, p[2]); x0 = std::min(x0, p[0]); x1 = std::max(x1, p[0]); y0 = std::min(y0, p[1]); y1 = std::max(y1, p[1]); }
+    std::vector<double> zs; for (double z = zmin - max_disp + layer * 0.5; z < zmax + max_disp; z += layer) zs.push_back(z);
+    double span = std::max(x1 - x0, y1 - y0) + 2 * max_disp;
+    Frame win = window_for(span, span, (x0 + x1) / 2, (y0 + y1) / 2, ppm, 2);
+
+    auto A = amplify_usd_banded(uc, shaders, subdiv_level, zs, 1);
+    auto B = amplify_usd_banded(uc, shaders, subdiv_level, zs, bands);
+    long worst = 0, total_diff = 0;
+    for (size_t li = 0; li < zs.size(); ++li) {
+        Frame fa = win, fb = win;
+        rasterize_layer(fa, A[li], cout_k, true);
+        rasterize_layer(fb, B[li], cout_k, true);
+        long d = 0; for (size_t p = 0; p < fa.rgb.size(); ++p) d += (fa.rgb[p] != fb.rgb[p]);
+        worst = std::max(worst, d); total_diff += d;
+    }
+    std::printf("usd-gate: band-count=1 vs band-count=%d over %zu layers @ %dx%d px (subdiv %d)\n",
+                bands, zs.size(), win.W, win.H, subdiv_level);
+    std::printf("usd-gate: %s  (total differing subpixels=%ld, worst layer=%ld)\n",
+                total_diff == 0 ? "PASS" : "FAIL", total_diff, worst);
+    return total_diff == 0 ? 0 : 2;
+}
 #endif
 
-Frame window_for(double xspan, double yspan, double cx, double cy, double ppm, int pad) {
-    Frame fr;
-    fr.ppm = ppm;
-    fr.W = (int)std::ceil(xspan * ppm) + 2 * pad;
-    fr.H = (int)std::ceil(yspan * ppm) + 2 * pad;
-    fr.xmin = cx - xspan / 2 - pad / ppm;
-    fr.ymin = cy - yspan / 2 - pad / ppm;
-    fr.rgb.assign((size_t)fr.W * fr.H * 3, 0);
-    return fr;
-}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -205,6 +249,8 @@ int main(int argc, char** argv) {
     int bg = (white || quad) ? 255 : 16;  // 4-up shots default to a white background
     if (!usd_in.empty()) {
 #ifdef PRINTMAN_USD
+        if (gate)
+            return run_usd_gate(usd_in, shaderdir, osl_disp, osl_color, reach, layer, ppm, subdiv_level, bands);
         return run_usd(usd_in, out, aovname, layer, ppm, subdiv_level, shaderdir, osl_disp, osl_color, reach, amp, stack, quad, bg);
 #else
         std::fprintf(stderr, "printman: built without USD (configure -DPRINTMAN_USD=ON)\n"); return 1;

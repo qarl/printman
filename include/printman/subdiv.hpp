@@ -499,13 +499,12 @@ inline std::vector<std::vector<int>> vertex_faces(const Cage &c) {
     return vf;
 }
 
-// Catmull-Clark-refine the `core` control faces to `levels`, together with their 1-ring halo as one
-// sub-cage. A CC patch is supported exactly by its 1-ring, so each core face refines bit-identically to
-// a whole-cage refinement; the halo refines wrongly at the cut and is dropped. Returns the core
-// children as one shared-indexed cage (no weld), so a Z-band never materializes the whole surface.
-inline Cage refine_region(const Cage &c, const std::vector<std::vector<int>> &vf,
-                          const std::vector<int> &core, int levels) {
-    // Region = core (placed first, so its children lead the refined cage) plus its 1-ring halo.
+// Assemble the sub-cage for a set of core control faces: the core faces first (so their refined
+// children lead), then their 1-ring halo (which exactly supports a Catmull-Clark limit patch).
+// Carries the face-varying UV and the creases/corners that fall inside. The first core.size() faces
+// are the core; the rest is halo. Factored out so a band loop can carry per-face data through it.
+inline Cage build_region_subcage(const Cage &c, const std::vector<std::vector<int>> &vf,
+                                 const std::vector<int> &core) {
     std::vector<int> faces = core;
     std::map<int, char> seen;
     for (int f : core) seen[f] = 1;
@@ -546,7 +545,16 @@ inline Cage refine_region(const Cage &c, const std::vector<std::vector<int>> &vf
     if (!c.corner_sharp.empty())
         for (const auto &kv : remap)
             if (kv.first < int(c.corner_sharp.size())) sub.corner_sharp[kv.second] = c.corner_sharp[kv.first];
+    return sub;
+}
 
+// Catmull-Clark-refine the `core` control faces to `levels`, together with their 1-ring halo. A CC
+// patch is supported exactly by its 1-ring, so each core face refines bit-identically to a whole-
+// cage refinement; the halo refines wrongly at the cut and is dropped. Returns the core children as
+// one shared-indexed cage (no weld), so a Z-band never materializes the whole surface.
+inline Cage refine_region(const Cage &c, const std::vector<std::vector<int>> &vf,
+                          const std::vector<int> &core, int levels) {
+    Cage sub = build_region_subcage(c, vf, core);
     const Cage r = subdivide(sub, "catmullClark", levels);
     // The core faces are sub-cage faces [0, core.size()); their children are the leading output faces
     // -- foff[core.size()] of them at level 1 (one quad per corner), then x4 per further level.
