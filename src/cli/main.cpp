@@ -187,10 +187,12 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
         zbufs[i].assign((size_t)RN*RN, -1e30);
     }
 
-    // Slice each mesh. Catmull-Clark surfaces, and (like RenderMan) any DISPLACED polygon mesh, go
-    // through the memory-bounded band loop -- CC smooths, bilinear dices the polygon so displacement
-    // resolves. A flat, undisplaced mesh (a colour-only robot) is materialized as-is: dicing would
-    // add nothing to its geometry. Each band renders into the shared frames; segments merge per layer.
+    // Slice each mesh. A Catmull-Clark surface goes through the band loop at a uniform level (its
+    // cage is uniform). A displaced quad polygon mesh takes the ADAPTIVE band loop (bound-and-split:
+    // each face dices to its own edge scale to the world tolerance -- bead width for the slice, ~1px
+    // for the render). A displaced non-quad polygon mesh falls back to uniform bilinear dicing. A
+    // flat, undisplaced mesh (a colour-only robot) is materialized -- dicing adds nothing.
+    const double slice_tol = line_width;
     std::vector<LayerSegs> layers(zs.size());
     size_t nbands_total = 0, unique_tri = 0; bool any_banded = false;
     for (size_t i = 0; i < meshes.size(); ++i) {
@@ -199,24 +201,44 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
         };
         double md = 0; for (const Shader* s : shaders[i]) md = std::max(md, s->max_reach());
         const std::string& sc = meshes[i].subdiv_scheme;
-        const bool diceable = (sc == "catmullClark") || ((sc == "none" || sc == "bilinear") && md > 0);
-        size_t corners = 0; for (int c : meshes[i].counts) corners += (size_t)c;
-        unique_tri += (diceable && slice_level >= 1) ? corners * (size_t(1) << (2 * (slice_level - 1))) * 2
-                                                     : corners - 2 * meshes[i].counts.size();
+        const bool poly = (sc == "none" || sc == "bilinear") && md > 0;
+        const bool adaptive = poly && all_quads(meshes[i]);
+        const bool uniform = (sc == "catmullClark") || (poly && !adaptive);
         std::vector<LayerSegs> L;
-        if (diceable) {
-            const std::string ds = (sc == "catmullClark") ? "catmullClark" : "bilinear";
-            int nb = std::max(1, usd_band_count(meshes[i], zs));
+        if (adaptive) {
             any_banded = true;
+            int nb = std::max(1, usd_band_count(meshes[i], zs));
+            for (int f = 0; f < (int)meshes[i].counts.size(); ++f) {  // estimate tri count at slice tol
+                size_t o = 0; for (int g = 0; g < f; ++g) o += meshes[i].counts[g];
+                if (meshes[i].counts[f] != 4) continue;
+                auto el = [&](int c0, int c1){ const auto& a = meshes[i].points[meshes[i].indices[o+c0]]; const auto& b = meshes[i].points[meshes[i].indices[o+c1]]; double dx=a[0]-b[0],dy=a[1]-b[1],dz=a[2]-b[2]; return edge_segments(std::sqrt(dx*dx+dy*dy+dz*dz), slice_tol); };
+                unique_tri += (size_t)std::max(el(0,1), el(3,2)) * std::max(el(1,2), el(0,3)) * 2;
+            }
+            if (slice_tol == render_tol) {
+                nbands_total += nb;
+                L = amplify_poly_banded(meshes[i], shaders[i], slice_tol, zs, nb, renderhook, /*do_slice*/ true);
+            } else {
+                nbands_total += 2 * nb;
+                L = amplify_poly_banded(meshes[i], shaders[i], slice_tol, zs, nb, {}, true);
+                amplify_poly_banded(meshes[i], shaders[i], render_tol, zs, nb, renderhook, /*do_slice*/ false);
+            }
+        } else if (uniform) {
+            any_banded = true;
+            const std::string ds = (sc == "catmullClark") ? "catmullClark" : "bilinear";
+            size_t corners = 0; for (int c : meshes[i].counts) corners += (size_t)c;
+            unique_tri += (slice_level >= 1) ? corners * (size_t(1) << (2 * (slice_level - 1))) * 2 : corners - 2 * meshes[i].counts.size();
+            int nb = std::max(1, usd_band_count(meshes[i], zs));
             if (slice_level == render_level) {
                 nbands_total += nb;
                 L = amplify_usd_banded(meshes[i], shaders[i], slice_level, zs, nb, renderhook, /*do_slice*/ true, ds);
-            } else {  // the slice and the render want different dicing -> a pass each, each memory-bounded
+            } else {
                 nbands_total += 2 * nb;
                 L = amplify_usd_banded(meshes[i], shaders[i], slice_level, zs, nb, {}, true, ds);
                 amplify_usd_banded(meshes[i], shaders[i], render_level, zs, nb, renderhook, /*do_slice*/ false, ds);
             }
         } else {
+            size_t corners = 0; for (int c : meshes[i].counts) corners += (size_t)c;
+            unique_tri += corners - 2 * meshes[i].counts.size();
             Mesh m = amplify_usd(meshes[i], shaders[i], slice_level);
             renderhook(m);
             L = slice_mesh(m, zs);

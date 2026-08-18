@@ -163,4 +163,119 @@ inline int usd_band_count(const UsdCage& uc, const std::vector<double>& zs) {
     return int((zs.size() + band_layers - 1) / band_layers);
 }
 
+// Segments an edge of world length `len` needs to sit under tolerance `tol` (a power of two,
+// clamped). Edge-intrinsic, so two faces sharing an edge always agree -> crack-free boundaries.
+inline int edge_segments(double len, double tol) {
+    if (tol <= 0 || len <= tol) return 1;
+    int L = std::min(8, std::max(0, (int)std::ceil(std::log2(len / tol))));
+    return 1 << L;
+}
+
+// ADAPTIVE bound-and-split for a quad polygon mesh (true REYES dicing): each control face dices to
+// its OWN edge scale, not one global level, so a fine face beside a coarse panel is not over-diced.
+// Crack-free by construction: each edge's segment count comes from the edge alone (shared faces
+// agree), boundary samples snap to it (coincident snaps make harmless degenerate triangles, never
+// hanging vertices), and per-control-vertex normals -- interpolated across the face -- match on
+// shared edges so the DISPLACED boundary matches too. `tol` is the world facet target (bead width
+// for the slice, ~1px for the render). Quads only; non-quad meshes use the uniform bilinear path.
+inline std::vector<LayerSegs> amplify_poly_banded(const UsdCage& uc,
+        const std::vector<const Shader*>& shaders, double tol,
+        const std::vector<double>& zs, int nbands,
+        const std::function<void(const Mesh&)>& on_band = {}, bool do_slice = true) {
+    std::vector<LayerSegs> out(zs.size());
+    const size_t nz = zs.size();
+    if (nz == 0 || nbands < 1) return out;
+    const int nf = int(uc.counts.size());
+    std::vector<int> foff(nf + 1, 0);
+    for (int f = 0; f < nf; ++f) foff[f + 1] = foff[f] + uc.counts[f];
+
+    // Per control-vertex normal (Newell per face, accumulated) -- band-independent, and shared, so
+    // interpolating it across faces gives matching normals on shared edges.
+    const int nv = int(uc.points.size());
+    std::vector<V3> vn(nv, V3{{0, 0, 0}});
+    for (int f = 0; f < nf; ++f) {
+        int a = foff[f], b = foff[f + 1]; V3 n{{0, 0, 0}};
+        for (int i = a; i < b; ++i) {
+            const auto& p0 = uc.points[uc.indices[i]]; const auto& p1 = uc.points[uc.indices[(i + 1 < b) ? i + 1 : a]];
+            n[0] += (p0[1]-p1[1])*(p0[2]+p1[2]); n[1] += (p0[2]-p1[2])*(p0[0]+p1[0]); n[2] += (p0[0]-p1[0])*(p0[1]+p1[1]);
+        }
+        for (int i = a; i < b; ++i) { vn[uc.indices[i]][0]+=n[0]; vn[uc.indices[i]][1]+=n[1]; vn[uc.indices[i]][2]+=n[2]; }
+    }
+    for (auto& n : vn) { double l=std::sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]); if (l>1e-12){n[0]/=l;n[1]/=l;n[2]/=l;} }
+
+    double max_disp = 0; for (const Shader* s : shaders) max_disp = std::max(max_disp, s->max_reach());
+    std::vector<double> flo(nf, 1e30), fhi(nf, -1e30);
+    for (int f = 0; f < nf; ++f) for (int i = foff[f]; i < foff[f + 1]; ++i) { double z = uc.points[uc.indices[i]][2]; flo[f]=std::min(flo[f],z); fhi[f]=std::max(fhi[f],z); }
+    const std::vector<int> ctag = uc.face_material.empty() ? std::vector<int>(nf, 0) : uc.face_material;
+    const int M = int(shaders.size());
+    const bool hasuv = uc.st.size() == uc.indices.size();
+
+    for (int band = 0; band < nbands; ++band) {
+        size_t g0 = (size_t)band*nz/nbands, g1 = (size_t)(band+1)*nz/nbands;
+        if (g0 >= g1) continue;
+        const double zlo = zs[g0], zhi = zs[g1-1];
+        std::vector<Mesh> parts(M); std::vector<int> na(M); int maxna = 1;
+        for (int m = 0; m < M; ++m) { parts[m].aov_names = shaders[m]->aov_names(); na[m]=int(parts[m].aov_names.size()); parts[m].aov.resize(na[m]); maxna=std::max(maxna,na[m]); }
+        std::vector<V3> av(maxna);
+
+        for (int f = 0; f < nf; ++f) {
+            if (fhi[f] < zlo - max_disp || flo[f] > zhi + max_disp) continue;   // face not in this band
+            if (foff[f+1] - foff[f] != 4) continue;                            // adaptive path is quads only
+            int mi = (f < int(ctag.size())) ? ctag[f] : 0; if (mi < 0 || mi >= M) mi = 0;
+            Mesh& mm = parts[mi]; const Shader& sh = *shaders[mi]; const int nak = na[mi];
+            V3 P[4], Nc[4]; V2 UV[4];
+            for (int c = 0; c < 4; ++c) { int vid = uc.indices[foff[f]+c];
+                P[c] = {{uc.points[vid][0], uc.points[vid][1], uc.points[vid][2]}}; Nc[c] = vn[vid];
+                UV[c] = hasuv ? V2{{uc.st[foff[f]+c][0], uc.st[foff[f]+c][1]}} : V2{{0, 0}}; }
+            auto elen = [&](int a, int b){ double dx=P[a][0]-P[b][0],dy=P[a][1]-P[b][1],dz=P[a][2]-P[b][2]; return std::sqrt(dx*dx+dy*dy+dz*dz); };
+            // edges: 0 bottom P0P1 (s), 1 right P1P2 (t), 2 top P3P2 (s), 3 left P0P3 (t)
+            const int s0 = edge_segments(elen(0,1), tol), s2 = edge_segments(elen(3,2), tol);
+            const int t1 = edge_segments(elen(1,2), tol), t3 = edge_segments(elen(0,3), tol);
+            const int Ns = std::max(s0, s2), Nt = std::max(t1, t3);
+            auto snap = [](double v, int seg){ return std::round(v*seg)/seg; };
+            auto emit = [&](double s, double t) -> std::uint32_t {
+                V3 a{{(1-s)*P[0][0]+s*P[1][0], (1-s)*P[0][1]+s*P[1][1], (1-s)*P[0][2]+s*P[1][2]}};
+                V3 b{{(1-s)*P[3][0]+s*P[2][0], (1-s)*P[3][1]+s*P[2][1], (1-s)*P[3][2]+s*P[2][2]}};
+                V3 p{{(1-t)*a[0]+t*b[0], (1-t)*a[1]+t*b[1], (1-t)*a[2]+t*b[2]}};
+                V3 na0{{(1-s)*Nc[0][0]+s*Nc[1][0], (1-s)*Nc[0][1]+s*Nc[1][1], (1-s)*Nc[0][2]+s*Nc[1][2]}};
+                V3 nb0{{(1-s)*Nc[3][0]+s*Nc[2][0], (1-s)*Nc[3][1]+s*Nc[2][1], (1-s)*Nc[3][2]+s*Nc[2][2]}};
+                V3 n{{(1-t)*na0[0]+t*nb0[0], (1-t)*na0[1]+t*nb0[1], (1-t)*na0[2]+t*nb0[2]}};
+                double nl=std::sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]); if (nl>1e-12){n[0]/=nl;n[1]/=nl;n[2]/=nl;}
+                V2 ua{{(1-s)*UV[0][0]+s*UV[1][0], (1-s)*UV[0][1]+s*UV[1][1]}};
+                V2 ub{{(1-s)*UV[3][0]+s*UV[2][0], (1-s)*UV[3][1]+s*UV[2][1]}};
+                V2 uv{{(1-t)*ua[0]+t*ub[0], (1-t)*ua[1]+t*ub[1]}};
+                double d = sh.displace(p, n, uv); sh.shade(p, n, uv, av.data());
+                std::uint32_t id = (std::uint32_t)mm.pos.size();
+                mm.pos.push_back({(float)(p[0]+d*n[0]), (float)(p[1]+d*n[1]), (float)(p[2]+d*n[2])});
+                mm.nrm.push_back({(float)n[0], (float)n[1], (float)n[2]});
+                mm.uv.push_back({(float)uv[0], (float)uv[1]});
+                for (int k = 0; k < nak; ++k) mm.aov[k].push_back({(float)av[k][0], (float)av[k][1], (float)av[k][2]});
+                return id;
+            };
+            std::vector<std::uint32_t> idx((size_t)(Ns+1)*(Nt+1));
+            for (int j = 0; j <= Nt; ++j) for (int i = 0; i <= Ns; ++i) {
+                double s = (double)i/Ns, t = (double)j/Nt;
+                if (j == 0) s = snap(s, s0); else if (j == Nt) s = snap(s, s2);   // bottom/top edges -> their segment count
+                if (i == 0) t = snap(t, t3); else if (i == Ns) t = snap(t, t1);   // left/right edges
+                idx[(size_t)j*(Ns+1)+i] = emit(s, t);
+            }
+            for (int j = 0; j < Nt; ++j) for (int i = 0; i < Ns; ++i) {
+                std::uint32_t a = idx[(size_t)j*(Ns+1)+i], b = idx[(size_t)j*(Ns+1)+i+1];
+                std::uint32_t c = idx[(size_t)(j+1)*(Ns+1)+i+1], dd = idx[(size_t)(j+1)*(Ns+1)+i];
+                mm.tri.push_back({a, b, c}); mm.tri.push_back({a, c, dd});
+            }
+        }
+        Mesh bm = (M == 1) ? std::move(parts[0]) : merge_meshes(parts);
+        if (do_slice) { std::vector<double> bandzs(zs.begin()+g0, zs.begin()+g1); auto segs = slice_mesh(bm, bandzs); for (size_t k=0;k<segs.size();++k) out[g0+k]=std::move(segs[k]); }
+        if (on_band) on_band(bm);
+    }
+    return out;
+}
+
+// True if every face is a quad -- the adaptive polygon path handles quads only.
+inline bool all_quads(const UsdCage& uc) {
+    for (int c : uc.counts) if (c != 4) return false;
+    return !uc.counts.empty();
+}
+
 }  // namespace printman
