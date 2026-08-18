@@ -27,13 +27,16 @@
 namespace printman {
 
 // `shaders` is one per uc.materials entry; `zs` are the (ascending) layer heights in the cage frame;
-// `nbands` splits `zs` into that many disjoint layer ranges. Returns per-layer slice segments.
+// `nbands` splits `zs` into that many disjoint layer ranges. `dice_scheme` is how the sub-cage is
+// refined -- "catmullClark" for a subdivision surface, "bilinear" to dice a polygon mesh (like
+// RenderMan) so displacement resolves on it. Returns per-layer slice segments.
 // on_band, if set, is handed each band's mesh before it's freed (e.g. to render it). do_slice=false
 // skips the slice (for a render-only pass at a different dicing level), returning empty layers.
 inline std::vector<LayerSegs> amplify_usd_banded(const UsdCage& uc,
         const std::vector<const Shader*>& shaders, int level,
         const std::vector<double>& zs, int nbands,
-        const std::function<void(const Mesh&)>& on_band = {}, bool do_slice = true) {
+        const std::function<void(const Mesh&)>& on_band = {}, bool do_slice = true,
+        const std::string& dice_scheme = "catmullClark") {
     std::vector<LayerSegs> out(zs.size());
     const size_t nz = zs.size();
     if (nz == 0 || nbands < 1) return out;
@@ -74,9 +77,11 @@ inline std::vector<LayerSegs> amplify_usd_banded(const UsdCage& uc,
             // material tag per sub-cage face: core faces first carry their control face's material
             std::vector<int> tag(sub.nfaces(), 0);
             for (int j = 0; j < ncore; ++j) tag[j] = (core[j] < int(ctag.size())) ? ctag[core[j]] : 0;
-            // subdivide the sub-cage, carrying the tag; the core children lead the refined faces
+            // Dice the sub-cage, carrying the tag; the core children lead the refined faces. Catmull-
+            // Clark smooths a subdiv surface; bilinear dices a polygon mesh (adds micropolygon density,
+            // preserves the flat shape) -- both emit one quad per corner, so the ncc count below holds.
             subdiv::Cage r = sub;
-            for (int i = 0; i < level; ++i) { tag = child_face_tags(r, "catmullClark", tag); r = subdiv_step(r, "catmullClark"); }
+            for (int i = 0; i < level; ++i) { tag = child_face_tags(r, dice_scheme, tag); r = subdiv_step(r, dice_scheme); }
             long long ncc = (level < 1) ? ncore : (long long)sub.foff[ncore];
             for (int l = 1; l < level; ++l) ncc *= 4;
             ncc = std::min<long long>(ncc, r.nfaces());
