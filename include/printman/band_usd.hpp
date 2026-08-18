@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "printman/amplify.hpp"   // child_face_tags, subdiv_step, merge_meshes
@@ -29,7 +30,8 @@ namespace printman {
 // `nbands` splits `zs` into that many disjoint layer ranges. Returns per-layer slice segments.
 inline std::vector<LayerSegs> amplify_usd_banded(const UsdCage& uc,
         const std::vector<const Shader*>& shaders, int level,
-        const std::vector<double>& zs, int nbands) {
+        const std::vector<double>& zs, int nbands,
+        const std::function<void(const Mesh&)>& on_band = {}) {
     std::vector<LayerSegs> out(zs.size());
     const size_t nz = zs.size();
     if (nz == 0 || nbands < 1) return out;
@@ -122,6 +124,7 @@ inline std::vector<LayerSegs> amplify_usd_banded(const UsdCage& uc,
             std::vector<double> bandzs(zs.begin() + g0, zs.begin() + g1);
             auto segs = slice_mesh(bm, bandzs);
             for (size_t k = 0; k < segs.size(); ++k) out[g0 + k] = std::move(segs[k]);
+            if (on_band) on_band(bm);   // e.g. render this band into a shared frame before it's freed
         }
         // band geometry (sub, r, vn, parts, bm, segs) is freed here -- the memory bound
     }

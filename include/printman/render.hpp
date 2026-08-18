@@ -15,27 +15,34 @@
 
 namespace printman {
 
-inline Frame render_mesh(const Mesh& m, int aov_k, bool srgb, bool lit, double az_deg, double el_deg,
-                         int N, int bg = 16) {
-    double az = az_deg * 3.14159265358979323846 / 180, el = el_deg * 3.14159265358979323846 / 180;
-    V3 f{{std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el)}};  // toward camera
+// An orthographic camera fixed to a bounding sphere (centre + radius), so many meshes -- e.g. the
+// Z-bands of a REYES slice -- render into ONE frame with a shared framing instead of each finding
+// its own. f is toward the camera; r/u the screen basis; scale maps world to pixels.
+struct Camera { V3 c, f, r, u; double scale; int N; };
+
+inline Camera make_camera(const V3& center, double radius, double az_deg, double el_deg, int N) {
+    const double PI = 3.14159265358979323846;
+    double az = az_deg * PI / 180, el = el_deg * PI / 180;
+    V3 f{{std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el)}};
     V3 up{{0, 0, 1}};
     V3 r{{up[1] * f[2] - up[2] * f[1], up[2] * f[0] - up[0] * f[2], up[0] * f[1] - up[1] * f[0]}};
     double rl = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]); r = {{r[0] / rl, r[1] / rl, r[2] / rl}};
     V3 u{{f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]}};
-    // centre + scale
-    V3 c{{0, 0, 0}}; for (auto& p : m.pos) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; }
-    for (auto& x : c) x /= std::max<size_t>(1, m.pos.size());
-    double rad = 0; for (auto& p : m.pos) { double dx = p[0] - c[0], dy = p[1] - c[1], dz = p[2] - c[2]; rad = std::max(rad, std::sqrt(dx * dx + dy * dy + dz * dz)); }
-    double scale = (N * 0.46) / std::max(1e-6, rad);
+    return Camera{center, f, r, u, (N * 0.46) / std::max(1e-6, radius), N};
+}
+
+// Rasterize a mesh INTO an existing frame + z-buffer (neither cleared), so bands accumulate.
+inline void render_into(Frame& fr, std::vector<double>& zbuf, const Mesh& m, const Camera& cam,
+                        int aov_k, bool srgb, bool lit) {
+    const int N = cam.N;
+    const V3 &c = cam.c, &r = cam.r, &u = cam.u, &f = cam.f;
+    const double scale = cam.scale;
     auto proj = [&](const std::array<float, 3>& p, double& sx, double& sy, double& dep) {
         V3 q{{p[0] - c[0], p[1] - c[1], p[2] - c[2]}};
         sx = N * 0.5 + (q[0] * r[0] + q[1] * r[1] + q[2] * r[2]) * scale;
         sy = N * 0.5 - (q[0] * u[0] + q[1] * u[1] + q[2] * u[2]) * scale;
         dep = q[0] * f[0] + q[1] * f[1] + q[2] * f[2];
     };
-    Frame fr; fr.W = fr.H = N; fr.rgb.assign(N * N * 3, (std::uint8_t)bg);
-    std::vector<double> zbuf(N * N, -1e30);
     V3 L{{-0.4, 0.5, 0.75}}; double ll = std::sqrt(L[0]*L[0]+L[1]*L[1]+L[2]*L[2]); for (auto& x : L) x /= ll;
     for (const auto& t : m.tri) {
         double sx[3], sy[3], dep[3];
@@ -69,15 +76,31 @@ inline Frame render_mesh(const Mesh& m, int aov_k, bool srgb, bool lit, double a
                 p[0] = enc(col[0] * sh, srgb); p[1] = enc(col[1] * sh, srgb); p[2] = enc(col[2] * sh, srgb);
             }
     }
+}
+
+// Bounding sphere of a mesh's positions.
+inline void mesh_sphere(const Mesh& m, V3& c, double& rad) {
+    c = {{0, 0, 0}}; for (auto& p : m.pos) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; }
+    for (auto& x : c) x /= std::max<size_t>(1, m.pos.size());
+    rad = 0; for (auto& p : m.pos) { double dx = p[0]-c[0], dy = p[1]-c[1], dz = p[2]-c[2]; rad = std::max(rad, std::sqrt(dx*dx+dy*dy+dz*dz)); }
+}
+
+inline Frame render_mesh(const Mesh& m, int aov_k, bool srgb, bool lit, double az, double el, int N, int bg = 16) {
+    V3 c; double rad; mesh_sphere(m, c, rad);
+    Frame fr; fr.W = fr.H = N; fr.rgb.assign((size_t)N * N * 3, (std::uint8_t)bg);
+    std::vector<double> zbuf((size_t)N * N, -1e30);
+    render_into(fr, zbuf, m, make_camera(c, rad, az, el, N), aov_k, srgb, lit);
     return fr;
 }
 
-// Four views (azimuths 90 deg apart, a slight elevation) tiled 2x2 with a gutter of the background
-// colour -- a turntable contact sheet showing every side at once.
-inline Frame render_quad(const Mesh& m, int aov_k, bool srgb, bool lit, int N, int bg) {
-    const double az[4] = {30, 120, 210, 300};
-    Frame v[4];
-    for (int i = 0; i < 4; ++i) v[i] = render_mesh(m, aov_k, srgb, lit, az[i], 18, N, bg);
+// The four turntable azimuths (90 deg apart) + elevation the 4-up sheet uses; shared so an
+// incremental (per-band) renderer can build the same views.
+inline const double* quad_azimuths() { static const double az[4] = {30, 120, 210, 300}; return az; }
+constexpr double kQuadElevation = 18;
+
+// Tile four same-size views 2x2 with a gutter of the background colour.
+inline Frame tile_quad(const Frame v[4], int bg) {
+    const int N = v[0].W;
     const int g = std::max(2, N / 40);
     const int W = 2 * N + 3 * g, H = 2 * N + 3 * g;
     Frame out; out.W = W; out.H = H; out.rgb.assign((size_t)W * H * 3, (std::uint8_t)bg);
@@ -88,6 +111,14 @@ inline Frame render_quad(const Mesh& m, int aov_k, bool srgb, bool lit, int N, i
                       &out.rgb[((size_t)(oy + y) * W + ox) * 3]);
     }
     return out;
+}
+
+// Four views tiled 2x2 -- a turntable contact sheet showing every side at once.
+inline Frame render_quad(const Mesh& m, int aov_k, bool srgb, bool lit, int N, int bg) {
+    const double* az = quad_azimuths();
+    Frame v[4];
+    for (int i = 0; i < 4; ++i) v[i] = render_mesh(m, aov_k, srgb, lit, az[i], kQuadElevation, N, bg);
+    return tile_quad(v, bg);
 }
 
 }  // namespace printman

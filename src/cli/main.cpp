@@ -21,7 +21,6 @@
 #include "printman/raster.hpp"
 #include "printman/render.hpp"
 #include "printman/slicer.hpp"
-#include "printman/surface.hpp"
 
 using namespace printman;
 
@@ -46,15 +45,6 @@ void usage() {
         "  --bands N     number of memory-bounded Z-bands for the gate (default 8)\n");
 }
 
-Frame window_of(const Mesh& m, double ppm, int pad) {
-    double x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
-    for (auto& p : m.pos) { x0 = std::min(x0, (double)p[0]); x1 = std::max(x1, (double)p[0]); y0 = std::min(y0, (double)p[1]); y1 = std::max(y1, (double)p[1]); }
-    Frame fr; fr.ppm = ppm; fr.xmin = x0 - pad / ppm; fr.ymin = y0 - pad / ppm;
-    fr.W = (int)std::ceil((x1 - x0) * ppm) + 2 * pad; fr.H = (int)std::ceil((y1 - y0) * ppm) + 2 * pad;
-    fr.rgb.assign((size_t)fr.W * fr.H * 3, 0);
-    return fr;
-}
-
 Frame window_for(double xspan, double yspan, double cx, double cy, double ppm, int pad) {
     Frame fr;
     fr.ppm = ppm;
@@ -64,24 +54,6 @@ Frame window_for(double xspan, double yspan, double cx, double cy, double ppm, i
     fr.ymin = cy - yspan / 2 - pad / ppm;
     fr.rgb.assign((size_t)fr.W * fr.H * 3, 0);
     return fr;
-}
-
-void write_stack_and_render(const Mesh& m, const std::vector<LayerSegs>& layers, const Frame& win,
-                            int aovk, bool srgb, const std::string& out, const std::string& aovname,
-                            bool stack, bool quad, int bg) {
-    std::error_code ec; std::filesystem::create_directories(out, ec);
-    if (stack) {
-        for (size_t li = 0; li < layers.size(); ++li) {
-            Frame fr = win; rasterize_layer(fr, layers[li], aovk, srgb);
-            char p[1024]; std::snprintf(p, sizeof(p), "%s/layer_%04zu.png", out.c_str(), li); write_png(p, fr);
-        }
-    }
-    int rc = m.aov_index("Cout"); bool rs = rc >= 0; if (rc < 0) rc = 0;
-    Frame rnd = quad ? render_quad(m, rc, rs, true, 700, bg) : render_mesh(m, rc, rs, true, 25, 15, 700, bg);
-    write_png(out + "/render.png", rnd);
-    std::printf("printman: %srender%s -> %s/\n", quad ? "4-up " : "",
-                stack ? (" + " + std::to_string(layers.size()) + "-layer stack (aov '" + aovname + "')").c_str() : "",
-                out.c_str());
 }
 
 #ifdef PRINTMAN_USD
@@ -141,35 +113,91 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
                 usd_in.c_str(), meshes.size(), nmat, np, nf, up.c_str(),
                 up == "Y" ? " (rotated to Z-up)" : "", sk);
 
-    // Amplify each mesh -- one shader per bound material, dispatched per face -- then merge to a model.
-    std::vector<Mesh> parts; parts.reserve(meshes.size());
-    int nosl = 0, ntex = 0, nflat = 0;
-    for (const auto& u : meshes) {
-        std::vector<std::unique_ptr<Shader>> owned;
-        std::vector<const Shader*> shaders;
-        for (const UsdMaterial& mtl : u.materials) {
+    // A shader per bound material, per mesh. Built up front so max_reach is known before we size zs.
+    std::vector<std::vector<std::unique_ptr<Shader>>> owned(meshes.size());
+    std::vector<std::vector<const Shader*>> shaders(meshes.size());
+    int nosl = 0, ntex = 0, nflat = 0; double max_disp = 0;
+    for (size_t i = 0; i < meshes.size(); ++i)
+        for (const UsdMaterial& mtl : meshes[i].materials) {
             ShaderKind kind = ShaderKind::Flat;
-            owned.push_back(make_shader(mtl, shaderdir, osl_disp, osl_color, reach, kind));
-            shaders.push_back(owned.back().get());
+            owned[i].push_back(make_shader(mtl, shaderdir, osl_disp, osl_color, reach, kind));
+            shaders[i].push_back(owned[i].back().get());
             (kind == ShaderKind::Osl ? nosl : kind == ShaderKind::Texture ? ntex : nflat)++;
+            max_disp = std::max(max_disp, shaders[i].back()->max_reach());
         }
-        parts.push_back(amplify_usd(u, shaders, subdiv_level));
-    }
     if (meshes.size() > 1 || nmat > 1)
         std::printf("printman: %zu material(s) -- %d OSL, %d textured, %d flat (no displacement on non-OSL parts)\n",
                     nmat, nosl, ntex, nflat);
-    Mesh m = merge_meshes(parts);
-    drop_to_plate(m);
-    if (m.pos.empty() || m.aov_names.empty()) { std::fprintf(stderr, "printman: nothing to slice\n"); return 1; }
+    if (shaders.empty() || shaders[0].empty()) { std::fprintf(stderr, "printman: no material\n"); return 1; }
 
-    int aovk = -1; for (size_t k = 0; k < m.aov_names.size(); ++k) if (m.aov_names[k] == aovname) aovk = (int)k;
-    if (aovk < 0) { std::fprintf(stderr, "printman: aov '%s' not found, using '%s'\n", aovname.c_str(), m.aov_names[0].c_str()); aovk = 0; }
-    bool srgb = (m.aov_names[aovk] == "Cout");
-    double zlo, zhi; mesh_z_range(m, zlo, zhi);
-    std::vector<double> zs; for (double z = layer * 0.5; z < zhi; z += layer) zs.push_back(z);
-    auto layers = slice_mesh(m, zs);
-    Frame win = window_of(m, ppm, 2);
-    write_stack_and_render(m, layers, win, aovk, srgb, out, aovname, stack, quad, bg);
+    // World bounds (grown by max displacement) fix the layer set, the slice window, and the camera --
+    // all up front, so the band loop and the incremental render share one framing and nothing is held whole.
+    double x0=1e30,x1=-1e30,y0=1e30,y1=-1e30,z0=1e30,z1=-1e30;
+    for (const auto& u : meshes) for (const auto& p : u.points) {
+        x0=std::min(x0,p[0]); x1=std::max(x1,p[0]); y0=std::min(y0,p[1]); y1=std::max(y1,p[1]); z0=std::min(z0,p[2]); z1=std::max(z1,p[2]); }
+    if (x0 > x1) { std::fprintf(stderr, "printman: empty scene\n"); return 1; }
+    std::vector<double> zs; for (double z = z0 - max_disp + layer * 0.5; z < z1 + max_disp; z += layer) zs.push_back(z);
+    const double xspan = (x1-x0) + 2*max_disp, yspan = (y1-y0) + 2*max_disp, zspan = (z1-z0) + 2*max_disp;
+    Frame win = window_for(xspan, yspan, (x0+x1)/2, (y0+y1)/2, ppm, 2);
+
+    // AOV index for the slice stack, Cout index for the render (assume a shared schema across meshes).
+    auto an0 = shaders[0][0]->aov_names();
+    int aovk = -1, cout_k = 0;
+    for (size_t k = 0; k < an0.size(); ++k) { if (an0[k] == aovname) aovk = (int)k; if (an0[k] == "Cout") cout_k = (int)k; }
+    if (aovk < 0) { std::fprintf(stderr, "printman: aov '%s' not found, using '%s'\n", aovname.c_str(), an0.empty()?"":an0[0].c_str()); aovk = 0; }
+    const bool srgb = (aovk < (int)an0.size() && an0[aovk] == "Cout");
+
+    // Render frame(s) + z-buffer(s), one per view, that every band paints into.
+    const int RN = 700, ncam = quad ? 4 : 1;
+    const V3 ctr{{(x0+x1)/2, (y0+y1)/2, (z0+z1)/2}};
+    double prad = 0;  // tight bounding-sphere radius: farthest control point, grown by displacement
+    for (const auto& u : meshes) for (const auto& p : u.points) {
+        double dx = p[0]-ctr[0], dy = p[1]-ctr[1], dz = p[2]-ctr[2]; prad = std::max(prad, std::sqrt(dx*dx+dy*dy+dz*dz)); }
+    const double rad = prad + max_disp;
+    (void)zspan;
+    std::vector<Frame> frames(ncam); std::vector<std::vector<double>> zbufs(ncam); std::vector<Camera> cams(ncam);
+    const double* qaz = quad_azimuths();
+    for (int i = 0; i < ncam; ++i) {
+        cams[i] = make_camera(ctr, rad, quad ? qaz[i] : 25.0, quad ? kQuadElevation : 15.0, RN);
+        frames[i].W = frames[i].H = RN; frames[i].rgb.assign((size_t)RN*RN*3, (std::uint8_t)bg);
+        zbufs[i].assign((size_t)RN*RN, -1e30);
+    }
+
+    // Slice each mesh -- Catmull-Clark through the memory-bounded band loop, other schemes whole (no
+    // amplification blow-up) -- rendering each band into the shared frames, then merge per-layer segments.
+    std::vector<LayerSegs> layers(zs.size());
+    size_t nbands_total = 0; bool any_banded = false;
+    for (size_t i = 0; i < meshes.size(); ++i) {
+        auto renderhook = [&](const Mesh& bm) {
+            for (int ci = 0; ci < ncam; ++ci) render_into(frames[ci], zbufs[ci], bm, cams[ci], cout_k, true, true);
+        };
+        std::vector<LayerSegs> L;
+        if (meshes[i].subdiv_scheme == "catmullClark") {
+            int nb = std::max(1, usd_band_count(meshes[i], zs));
+            nbands_total += nb; any_banded = true;
+            L = amplify_usd_banded(meshes[i], shaders[i], subdiv_level, zs, nb, renderhook);
+        } else {
+            Mesh m = amplify_usd(meshes[i], shaders[i], subdiv_level);
+            renderhook(m);
+            L = slice_mesh(m, zs);
+        }
+        for (size_t li = 0; li < zs.size(); ++li)
+            layers[li].insert(layers[li].end(), L[li].begin(), L[li].end());
+    }
+
+    std::error_code ec; std::filesystem::create_directories(out, ec);
+    if (stack)
+        for (size_t li = 0; li < layers.size(); ++li) {
+            Frame fr = win; rasterize_layer(fr, layers[li], aovk, srgb);
+            char p[1024]; std::snprintf(p, sizeof(p), "%s/layer_%04zu.png", out.c_str(), li); write_png(p, fr);
+        }
+    Frame rnd = quad ? tile_quad(frames.data(), bg) : std::move(frames[0]);
+    write_png(out + "/render.png", rnd);
+
+    std::printf("printman: %s%zu layers%s%s -> %s/\n", quad ? "4-up render + " : "render + ",
+                zs.size(),
+                any_banded ? (" via " + std::to_string(nbands_total) + " Z-bands (memory-bounded)").c_str() : " (materialized)",
+                stack ? (" + stack (aov '" + aovname + "')").c_str() : "", out.c_str());
     return 0;
 }
 
