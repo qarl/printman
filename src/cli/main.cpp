@@ -30,12 +30,14 @@ void usage() {
         "printman - geometry amplification for 3D printing\n"
         "\n"
         "usage:\n"
-        "  printman SCENE.usda [--out DIR] [--stack] [--subdiv-level N] [--aov NAME]\n"
-        "                      [--shaderdir DIR] [--reach MM] [--layer MM] [--res PXMM]\n"
+        "  printman SCENE.usda [--out DIR] [--stack] [--quad] [--white] [--subdiv-level N]\n"
+        "                      [--aov NAME] [--shaderdir DIR] [--reach MM] [--layer MM] [--res PXMM]\n"
         "  printman --gate [--bands N]      self-test: band-count=1 == band-count=N (design gate)\n"
         "  printman --help\n"
         "\n"
         "  SCENE.usda    load a USD mesh + its bound material, subdivide, amplify, render\n"
+        "  --quad        render a 2x2 contact sheet from four angles (on a white background)\n"
+        "  --white       render on a white background instead of dark\n"
         "  --stack       also write the per-layer PNG slice stack (off by default; render only)\n"
         "  --subdiv-level N   Catmull-Clark refinement levels (default 2)\n"
         "  --aov NAME    shader output to rasterize per layer (default Cout)\n"
@@ -54,7 +56,7 @@ Frame window_of(const Mesh& m, double ppm, int pad) {
 
 void write_stack_and_render(const Mesh& m, const std::vector<LayerSegs>& layers, const Frame& win,
                             int aovk, bool srgb, const std::string& out, const std::string& aovname,
-                            bool stack) {
+                            bool stack, bool quad, int bg) {
     std::error_code ec; std::filesystem::create_directories(out, ec);
     if (stack) {
         for (size_t li = 0; li < layers.size(); ++li) {
@@ -63,8 +65,9 @@ void write_stack_and_render(const Mesh& m, const std::vector<LayerSegs>& layers,
         }
     }
     int rc = m.aov_index("Cout"); bool rs = rc >= 0; if (rc < 0) rc = 0;
-    Frame rnd = render_mesh(m, rc, rs, true, 25, 15, 700); write_png(out + "/render.png", rnd);
-    std::printf("printman: render%s -> %s/\n",
+    Frame rnd = quad ? render_quad(m, rc, rs, true, 700, bg) : render_mesh(m, rc, rs, true, 25, 15, 700, bg);
+    write_png(out + "/render.png", rnd);
+    std::printf("printman: %srender%s -> %s/\n", quad ? "4-up " : "",
                 stack ? (" + " + std::to_string(layers.size()) + "-layer stack (aov '" + aovname + "')").c_str() : "",
                 out.c_str());
 }
@@ -114,7 +117,8 @@ std::unique_ptr<Shader> make_shader(const UsdMaterial& mtl, const std::string& s
 
 int run_usd(const std::string& usd_in, const std::string& out, const std::string& aovname,
             double layer, double ppm, int subdiv_level, const std::string& shaderdir,
-            const std::string& osl_disp, const std::string& osl_color, double reach, double amp, bool stack) {
+            const std::string& osl_disp, const std::string& osl_color, double reach, double amp,
+            bool stack, bool quad, int bg) {
     (void)amp;
     std::vector<UsdCage> meshes; std::string err; int skipped = 0;
     if (!load_usd_scene(usd_in, PRINTMAN_USD_PLUGINDIR, meshes, skipped, err)) { std::fprintf(stderr, "printman: %s\n", err.c_str()); return 1; }
@@ -153,7 +157,7 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
     std::vector<double> zs; for (double z = layer * 0.5; z < zhi; z += layer) zs.push_back(z);
     auto layers = slice_mesh(m, zs);
     Frame win = window_of(m, ppm, 2);
-    write_stack_and_render(m, layers, win, aovk, srgb, out, aovname, stack);
+    write_stack_and_render(m, layers, win, aovk, srgb, out, aovname, stack, quad, bg);
     return 0;
 }
 #endif
@@ -174,12 +178,14 @@ int main(int argc, char** argv) {
     std::string out = "out", aovname = "Cout", osl_disp, osl_color, shaderdir, usd_in;
     double layer = 0.1, ppm = 8.0, R = 20.0, amp = 6.0, reach = 0;
     int nu = 180, nv = 90, bands = 8, subdiv_level = 2;
-    bool gate = false, stack = false;
+    bool gate = false, stack = false, quad = false, white = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : ""; };
         if (a == "--gate") gate = true;
         else if (a == "--stack") stack = true;
+        else if (a == "--quad") quad = true;
+        else if (a == "--white") white = true;
         else if (a == "--out") out = next();
         else if (a == "--aov") aovname = next();
         else if (a == "--layer") layer = std::atof(next().c_str());
@@ -196,9 +202,10 @@ int main(int argc, char** argv) {
         else if (!a.empty() && a[0] != '-') usd_in = a;  // positional: a USD scene
     }
 
+    int bg = (white || quad) ? 255 : 16;  // 4-up shots default to a white background
     if (!usd_in.empty()) {
 #ifdef PRINTMAN_USD
-        return run_usd(usd_in, out, aovname, layer, ppm, subdiv_level, shaderdir, osl_disp, osl_color, reach, amp, stack);
+        return run_usd(usd_in, out, aovname, layer, ppm, subdiv_level, shaderdir, osl_disp, osl_color, reach, amp, stack, quad, bg);
 #else
         std::fprintf(stderr, "printman: built without USD (configure -DPRINTMAN_USD=ON)\n"); return 1;
 #endif

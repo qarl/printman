@@ -15,7 +15,8 @@
 
 namespace printman {
 
-inline Frame render_mesh(const Mesh& m, int aov_k, bool srgb, bool lit, double az_deg, double el_deg, int N) {
+inline Frame render_mesh(const Mesh& m, int aov_k, bool srgb, bool lit, double az_deg, double el_deg,
+                         int N, int bg = 16) {
     double az = az_deg * 3.14159265358979323846 / 180, el = el_deg * 3.14159265358979323846 / 180;
     V3 f{{std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el)}};  // toward camera
     V3 up{{0, 0, 1}};
@@ -33,7 +34,7 @@ inline Frame render_mesh(const Mesh& m, int aov_k, bool srgb, bool lit, double a
         sy = N * 0.5 - (q[0] * u[0] + q[1] * u[1] + q[2] * u[2]) * scale;
         dep = q[0] * f[0] + q[1] * f[1] + q[2] * f[2];
     };
-    Frame fr; fr.W = fr.H = N; fr.rgb.assign(N * N * 3, 16);
+    Frame fr; fr.W = fr.H = N; fr.rgb.assign(N * N * 3, (std::uint8_t)bg);
     std::vector<double> zbuf(N * N, -1e30);
     V3 L{{-0.4, 0.5, 0.75}}; double ll = std::sqrt(L[0]*L[0]+L[1]*L[1]+L[2]*L[2]); for (auto& x : L) x /= ll;
     for (const auto& t : m.tri) {
@@ -69,6 +70,24 @@ inline Frame render_mesh(const Mesh& m, int aov_k, bool srgb, bool lit, double a
             }
     }
     return fr;
+}
+
+// Four views (azimuths 90 deg apart, a slight elevation) tiled 2x2 with a gutter of the background
+// colour -- a turntable contact sheet showing every side at once.
+inline Frame render_quad(const Mesh& m, int aov_k, bool srgb, bool lit, int N, int bg) {
+    const double az[4] = {30, 120, 210, 300};
+    Frame v[4];
+    for (int i = 0; i < 4; ++i) v[i] = render_mesh(m, aov_k, srgb, lit, az[i], 18, N, bg);
+    const int g = std::max(2, N / 40);
+    const int W = 2 * N + 3 * g, H = 2 * N + 3 * g;
+    Frame out; out.W = W; out.H = H; out.rgb.assign((size_t)W * H * 3, (std::uint8_t)bg);
+    for (int i = 0; i < 4; ++i) {
+        const int ox = g + (i % 2) * (N + g), oy = g + (i / 2) * (N + g);
+        for (int y = 0; y < N; ++y)
+            std::copy(&v[i].rgb[(size_t)y * N * 3], &v[i].rgb[(size_t)(y + 1) * N * 3],
+                      &out.rgb[((size_t)(oy + y) * W + ox) * 3]);
+    }
+    return out;
 }
 
 }  // namespace printman
