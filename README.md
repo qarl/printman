@@ -36,14 +36,23 @@ the seams.
 ## What it does today
 
 - **USD front‑end.** Reads `UsdGeomMesh` (polygon and Catmull‑Clark cages, with semi‑sharp
-  creases/corners), intrinsic gprims (Cube/Sphere/Cylinder/Cone), scene‑graph instancing (including
-  mirrored placements), `metersPerUnit` scaling, up‑axis, and orientation — validated on load.
+  creases/corners), intrinsic gprims (Cube/Sphere/Cylinder/Cone), `metersPerUnit` scaling, up‑axis,
+  and orientation — validated on load.
 - **OSL shading.** Your compiled `.oso` displacement and surface shaders drive the relief and the
   colour (`Cout`). A built‑in procedural planet shader runs the pipeline with no OSL install.
-- **Adaptive dicing.** Each control face dices to its *own* edge scale (fine where it needs to be,
-  coarse where it doesn't) and stays crack‑free across shared edges. Catmull‑Clark subdivision is
-  validated to float precision against OpenSubdiv; **any** cage works — a non‑quad one is made
-  all‑quad by one CC step, so its limit surface is unchanged.
+- **Subdivision surfaces — device‑perfect smoothing.** A Catmull‑Clark cage becomes its true smooth
+  limit surface (validated to float precision against OpenSubdiv, semi‑sharp creases and corners
+  included). Crucially, each output dices that limit surface to *its own* resolution — the slice to
+  the bead/extrusion width, the render to ~1 pixel — so the surface is as smooth as the device can
+  actually print or show, never faceted by a fixed mesh you picked in advance. Dicing is adaptive:
+  each control face refines to its own edge scale (fine where it needs to be, coarse where it
+  doesn't), crack‑free across shared edges. **Any** cage works — a non‑quad one is made all‑quad by
+  one Catmull‑Clark step, so its limit surface is unchanged.
+- **Instancing — low‑memory model replication.** A prototype cage referenced by many scene‑graph
+  placements is amplified *per instance* through the band loop, so replicating a model to arbitrary
+  detail costs one band of geometry in memory — not N fully‑amplified meshes. Mirrored
+  (negative‑determinant) placements are handled, with the winding flipped so the relief still points
+  outward.
 - **Displacement that respects the surface.** Subdivision surfaces displace along the smooth limit
   normal; polygon meshes use a **per‑face‑average** rule — evaluate the shader per incident face with
   that face's flat normal and average the displacement vectors at each shared vertex, so the mesh
