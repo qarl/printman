@@ -1,0 +1,31 @@
+#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 0.001
+)
+# One of each intrinsic gprim: Cube, Sphere, Cylinder, Cone. Each must tessellate to a solid,
+# correctly-wound polygon mesh (an inverted winding renders inside-out / dark).
+def Cube "cube" {
+    double size = 20
+    double3 xformOp:translate = (0, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+def Sphere "sphere" {
+    double radius = 10
+    double3 xformOp:translate = (40, 0, 10)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+def Cylinder "cyl" {
+    double radius = 8
+    double height = 20
+    uniform token axis = "Z"
+    double3 xformOp:translate = (75, 0, 10)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+def Cone "cone" {
+    double radius = 9
+    double height = 22
+    uniform token axis = "Z"
+    double3 xformOp:translate = (110, 0, 11)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}

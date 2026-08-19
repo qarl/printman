@@ -17,7 +17,12 @@
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/imageable.h>
+#include <pxr/usd/usdGeom/cone.h>
+#include <pxr/usd/usdGeom/cube.h>
+#include <pxr/usd/usdGeom/cylinder.h>
+#include <pxr/usd/usdGeom/gprim.h>
 #include <pxr/usd/usdGeom/mesh.h>
+#include <pxr/usd/usdGeom/sphere.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/subset.h>
@@ -153,6 +158,92 @@ void read_materials(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& meshPr
 // Read one Mesh prim into a cage: points baked to world space (its local-to-world transform) and
 // normalized to Z-up (yup), faces, face-varying primvars:st, and its bound material. Returns false
 // for an empty mesh (no points).
+// Bake a gprim's local tessellation to a world-space UsdCage: world transform + mm scale + up-axis
+// normalize + winding flip (mirroring transform), matching read_mesh. Implicit gprims are hard-faced
+// polygon meshes -> scheme "none".
+bool finalize_gprim(const std::vector<pxr::GfVec3d>& local, std::vector<int> counts,
+                    std::vector<int> indices, const pxr::UsdPrim& prim, bool yup, double mpu,
+                    pxr::UsdTimeCode t, UsdCage& out) {
+    using namespace pxr;
+    if (local.empty() || counts.empty()) return false;
+    GfMatrix4d m2w = UsdGeomXformable(prim).ComputeLocalToWorldTransform(t);
+    const bool flip = m2w.GetDeterminant() < 0.0;
+    out.points.reserve(local.size());
+    for (const auto& p : local) {
+        GfVec3d w = m2w.Transform(p) * mpu;
+        if (!std::isfinite(w[0]) || !std::isfinite(w[1]) || !std::isfinite(w[2])) return false;
+        out.points.push_back(yup ? std::array<double, 3>{w[0], -w[2], w[1]}
+                                 : std::array<double, 3>{w[0], w[1], w[2]});
+    }
+    if (flip) { size_t o = 0; for (int c : counts) { std::reverse(indices.begin() + o, indices.begin() + o + c); o += (size_t)c; } }
+    out.counts = std::move(counts);
+    out.indices = std::move(indices);
+    out.subdiv_scheme = "none";
+    return true;
+}
+
+// Tessellate an implicit gprim (Cube / Sphere / Cylinder / Cone) into a polygon mesh. Faces wound
+// CCW-outward in the prim's local frame. Cylinder/Cone honor the axis token by building in a canonical
+// Z frame and permuting. Returns false if the prim is not a supported gprim.
+bool read_gprim(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& prim, bool yup, double mpu, UsdCage& out) {
+    using namespace pxr;
+    const UsdTimeCode t = UsdTimeCode::EarliestTime();
+    const int NLON = 48, NLAT = 24;
+    std::vector<GfVec3d> P; std::vector<int> counts, idx;
+    auto quad = [&](int a, int b, int c, int d){ counts.push_back(4); idx.insert(idx.end(), {a, b, c, d}); };
+    auto tri  = [&](int a, int b, int c){ counts.push_back(3); idx.insert(idx.end(), {a, b, c}); };
+
+    if (prim.IsA<UsdGeomCube>()) {
+        double s = 2; UsdGeomCube(prim).GetSizeAttr().Get(&s, t); double h = s * 0.5;
+        P = {{-h,-h,-h},{h,-h,-h},{h,h,-h},{-h,h,-h},{-h,-h,h},{h,-h,h},{h,h,h},{-h,h,h}};
+        quad(0,3,2,1); quad(4,5,6,7); quad(0,1,5,4); quad(1,2,6,5); quad(2,3,7,6); quad(3,0,4,7);
+    } else if (prim.IsA<UsdGeomSphere>()) {
+        double r = 1; UsdGeomSphere(prim).GetRadiusAttr().Get(&r, t);
+        P.push_back({0,0,r});                                        // north pole = 0
+        std::vector<int> ring;
+        for (int j = 1; j < NLAT; ++j) { ring.push_back((int)P.size());
+            double th = M_PI * j / NLAT;
+            for (int i = 0; i < NLON; ++i) { double ph = 2*M_PI*i/NLON;
+                P.push_back({r*std::sin(th)*std::cos(ph), r*std::sin(th)*std::sin(ph), r*std::cos(th)}); } }
+        int south = (int)P.size(); P.push_back({0,0,-r});
+        for (int i = 0; i < NLON; ++i) tri(0, ring[0]+i, ring[0]+(i+1)%NLON);                 // north cap
+        for (int j = 0; j < NLAT-2; ++j) for (int i = 0; i < NLON; ++i)
+            quad(ring[j]+i, ring[j+1]+i, ring[j+1]+(i+1)%NLON, ring[j]+(i+1)%NLON);           // body
+        int last = ring[NLAT-2];
+        for (int i = 0; i < NLON; ++i) tri(south, last+(i+1)%NLON, last+i);                  // south cap
+    } else if (prim.IsA<UsdGeomCylinder>() || prim.IsA<UsdGeomCone>()) {
+        const bool cone = prim.IsA<UsdGeomCone>();
+        double r = 1, hgt = 2; TfToken axis = UsdGeomTokens->z;
+        if (cone) { UsdGeomCone c(prim); c.GetRadiusAttr().Get(&r,t); c.GetHeightAttr().Get(&hgt,t); c.GetAxisAttr().Get(&axis,t); }
+        else      { UsdGeomCylinder c(prim); c.GetRadiusAttr().Get(&r,t); c.GetHeightAttr().Get(&hgt,t); c.GetAxisAttr().Get(&axis,t); }
+        const double zt = hgt*0.5, zb = -hgt*0.5;
+        // canonical Z frame -> permute to the requested axis
+        auto put = [&](double x, double y, double z){
+            if (axis == UsdGeomTokens->x)      P.push_back({z, x, y});
+            else if (axis == UsdGeomTokens->y) P.push_back({y, z, x});
+            else                               P.push_back({x, y, z});
+        };
+        int topc = (int)P.size(); put(0,0,zt);                       // top centre (cylinder) / apex (cone)
+        int botc = (int)P.size(); put(0,0,zb);                       // bottom centre
+        int bring = (int)P.size();
+        for (int i = 0; i < NLON; ++i) { double a = 2*M_PI*i/NLON; put(r*std::cos(a), r*std::sin(a), zb); }  // base ring
+        if (cone) {
+            for (int i = 0; i < NLON; ++i) tri(topc, bring+i, bring+(i+1)%NLON);              // side to apex
+            for (int i = 0; i < NLON; ++i) tri(botc, bring+(i+1)%NLON, bring+i);              // base cap
+        } else {
+            int tring = (int)P.size();
+            for (int i = 0; i < NLON; ++i) { double a = 2*M_PI*i/NLON; put(r*std::cos(a), r*std::sin(a), zt); }  // top ring
+            for (int i = 0; i < NLON; ++i) quad(bring+i, bring+(i+1)%NLON, tring+(i+1)%NLON, tring+i);  // tube
+            for (int i = 0; i < NLON; ++i) tri(topc, tring+i, tring+(i+1)%NLON);              // top cap
+            for (int i = 0; i < NLON; ++i) tri(botc, bring+(i+1)%NLON, bring+i);              // bottom cap
+        }
+    } else return false;
+    if (!finalize_gprim(P, std::move(counts), std::move(idx), prim, yup, mpu, t, out)) return false;
+    UsdGeomPrimvarsAPI pv(prim);
+    read_materials(stage, prim, pv.GetPrimvar(TfToken("displayColor")), out);   // default gray or displayColor
+    return true;
+}
+
 bool read_mesh(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& prim, bool yup, double mm_per_unit, UsdCage& out) {
     using namespace pxr;
     const UsdTimeCode t = UsdTimeCode::EarliestTime();   // earliest authored sample if animated, else default
@@ -251,14 +342,18 @@ bool load_usd_scene(const std::string& path, const std::string& plugin_dir,
     // transform (incl. mirror via the det<0 flip) and its device level (world edge lengths) are
     // correct without a local-frame prototype path. Abstract prototype (class) prims are skipped.
     for (const UsdPrim& p : UsdPrimRange::Stage(stage, UsdTraverseInstanceProxies())) {
-        if (!p.IsA<UsdGeomMesh>()) continue;
+        const bool ismesh = p.IsA<UsdGeomMesh>();
+        const bool isgprim = !ismesh && p.IsA<UsdGeomGprim>();   // Cube/Sphere/Cylinder/Cone (tessellated)
+        if (!ismesh && !isgprim) continue;
         // Skip non-render geometry: proxy/guide stand-ins and invisible prims are not what we print.
         UsdGeomImageable img(p);
         TfToken purpose = img.ComputePurpose();
         if (purpose == UsdGeomTokens->proxy || purpose == UsdGeomTokens->guide) { ++skipped; continue; }
         if (img.ComputeVisibility() == UsdGeomTokens->invisible) { ++skipped; continue; }
         UsdCage c; c.up_axis = upstr;
-        if (read_mesh(stage, p, yup, mm_per_unit, c)) out.push_back(std::move(c));
+        bool ok = ismesh ? read_mesh(stage, p, yup, mm_per_unit, c)
+                         : read_gprim(stage, p, yup, mm_per_unit, c);
+        if (ok) out.push_back(std::move(c));
         else ++skipped;
     }
     if (out.empty()) { err = "no printable Mesh prim in " + path; return false; }

@@ -76,4 +76,6 @@ if(PRINTMAN_USD)
     COMMAND printman ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/cube_meters.usda --gate --bands 8 --subdiv-level 4)
   add_test(NAME instancing_gate   # scene-graph instance proxies must be traversed and read
     COMMAND printman ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/instanced.usda --gate --bands 8 --subdiv-level 4)
+  add_test(NAME gprim_load   # Cube/Sphere/Cylinder/Cone must tessellate to sliceable solids
+    COMMAND printman ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/gprims.usda --out ${CMAKE_BINARY_DIR}/gprim_out)
 endif()
