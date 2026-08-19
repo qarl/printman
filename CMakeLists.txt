@@ -58,7 +58,7 @@ endif()
 # The unit harnesses build their cages in code (no USD/OSL), so they compile and run everywhere and
 # guard the crown-jewel invariants: crack-free adaptive dicing and pixel-exact band-count invariance.
 enable_testing()
-foreach(t poly_watertight poly_face_average adaptive_cc open_cc crease_invariance palette)
+foreach(t poly_watertight poly_face_average adaptive_cc open_cc crease_invariance palette object_space)
   add_executable(${t}_test tests/${t}_test.cpp)
   target_include_directories(${t}_test PRIVATE include third_party)
   target_compile_options(${t}_test PRIVATE -Wall -Wextra)

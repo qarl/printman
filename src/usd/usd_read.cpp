@@ -72,6 +72,10 @@ void extract_material(const pxr::UsdStageRefPtr& stage, const pxr::UsdShadeMater
             UsdShadeInput mm = disp.GetInput(TfToken("printman:maxMagnitude"));
             if (mm) { float v = 0; if (mm.Get(&v)) out.max_magnitude = v; }
         }
+        if (surf) {   // colour-shader hint: evaluate Cout in object-normalized Z (see UsdMaterial)
+            UsdShadeInput os = surf.GetInput(TfToken("printman:objectSpace"));
+            if (os) { bool v = false; if (os.Get(&v)) out.object_space = v; }
+        }
     }
 
     VtVec3fArray dcv;

@@ -45,6 +45,7 @@ void usage() {
         "  --rres PX     render image resolution (default 700); the render level follows it\n"
         "  --aov NAME    shader output to rasterize per layer (default Cout)\n"
         "  --shaderdir DIR    directory of compiled .oso shaders (the material's OSL shaders)\n"
+        "  --object-space     force Cout into object-normalized Z (else read from inputs:printman:objectSpace)\n"
         "  --bands N     number of memory-bounded Z-bands for the gate (default 8)\n");
 }
 
@@ -106,7 +107,7 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
             double layer, double ppm, int subdiv_level, const std::string& shaderdir,
             const std::string& osl_disp, const std::string& osl_color, double reach, double amp,
             bool stack, bool quad, int bg, int rres, double line_width,
-            const std::vector<RGBColor>& palette, bool dither) {
+            const std::vector<RGBColor>& palette, bool dither, bool force_object_space) {
     (void)amp;
     std::vector<UsdCage> meshes; std::string err; int skipped = 0;
     if (!load_usd_scene(usd_in, PRINTMAN_USD_PLUGINDIR, meshes, skipped, err)) { std::fprintf(stderr, "printman: %s\n", err.c_str()); return 1; }
@@ -141,6 +142,18 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
         x0=std::min(x0,p[0]); x1=std::max(x1,p[0]); y0=std::min(y0,p[1]); y1=std::max(y1,p[1]); z0=std::min(z0,p[2]); z1=std::max(z1,p[2]); }
     if (x0 > x1) { std::fprintf(stderr, "printman: empty scene\n"); return 1; }
     std::vector<double> zs; for (double z = z0 - max_disp + layer * 0.5; z < z1 + max_disp; z += layer) zs.push_back(z);
+
+    // Object-space colour (inputs:printman:objectSpace, or --object-space): now that the layer range
+    // is known, wrap each opting-in material's shader so Cout sees object-normalized Z. The wrapper
+    // delegates displace/max_reach, so max_disp and zs above are unaffected.
+    if (zs.size() > 1)
+        for (size_t i = 0; i < meshes.size(); ++i)
+            for (size_t j = 0; j < meshes[i].materials.size() && j < shaders[i].size(); ++j)
+                if (meshes[i].materials[j].object_space || force_object_space) {
+                    owned[i].push_back(std::make_unique<ObjectSpaceColor>(shaders[i][j], zs.front(), zs.back()));
+                    shaders[i][j] = owned[i].back().get();
+                }
+
     const double xspan = (x1-x0) + 2*max_disp, yspan = (y1-y0) + 2*max_disp, zspan = (z1-z0) + 2*max_disp;
     Frame win = window_for(xspan, yspan, (x0+x1)/2, (y0+y1)/2, ppm, 2);
 
@@ -332,7 +345,7 @@ int main(int argc, char** argv) {
     double layer = 0.1, ppm = 8.0, R = 20.0, amp = 6.0, reach = 0;
     int nu = 180, nv = 90, bands = 8, subdiv_level = -1, rres = 700;   // subdiv -1 = auto (per-output)
     double line_width = 0.4;
-    bool gate = false, stack = false, quad = false, white = false, dither = false;
+    bool gate = false, stack = false, quad = false, white = false, dither = false, object_space = false;
     std::vector<RGBColor> palette;   // --palette rrggbb,rrggbb,... : filament colours to quantize to
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -356,6 +369,7 @@ int main(int argc, char** argv) {
         else if (a == "--subdiv-level") subdiv_level = std::atoi(next().c_str());
         else if (a == "--line-width") line_width = std::atof(next().c_str());
         else if (a == "--dither") dither = true;
+        else if (a == "--object-space") object_space = true;   // force Cout into object-normalized Z
         else if (a == "--palette") {   // "rrggbb,rrggbb,..." hex filament colours
             std::string s = next();
             for (size_t p = 0; p < s.size();) {
@@ -375,7 +389,7 @@ int main(int argc, char** argv) {
 #ifdef PRINTMAN_USD
         if (gate)
             return run_usd_gate(usd_in, shaderdir, osl_disp, osl_color, reach, layer, ppm, subdiv_level, bands);
-        return run_usd(usd_in, out, aovname, layer, ppm, subdiv_level, shaderdir, osl_disp, osl_color, reach, amp, stack, quad, bg, rres, line_width, palette, dither);
+        return run_usd(usd_in, out, aovname, layer, ppm, subdiv_level, shaderdir, osl_disp, osl_color, reach, amp, stack, quad, bg, rres, line_width, palette, dither, object_space);
 #else
         std::fprintf(stderr, "printman: built without USD (configure -DPRINTMAN_USD=ON)\n"); return 1;
 #endif

@@ -81,6 +81,25 @@ struct ProceduralPlanet : Shader {
     double max_reach() const override { return amp; }
 };
 
+// Object-space colour remap (USD opt-in via the surface shader's inputs:printman:objectSpace). The
+// COLOUR (shade) sees an object-normalized height -- z mapped to [0,1] across the object's layer range
+// (0 at the bottom layer, 1 at the top) -- so a gradient shader spans the whole object at any size,
+// while DISPLACEMENT still sees the true world point (relief is a world-space effect). A pass-through
+// decorator: wrap any shader, leave displace/max_reach/AOV names untouched, remap only shade's input.
+// Matches the fork (PrintObjectSlice.cpp: color.eval remaps p.z to (z-z0)/(z1-z0) for colour only).
+struct ObjectSpaceColor : Shader {
+    const Shader* inner;
+    double z0, inv;
+    ObjectSpaceColor(const Shader* s, double zlo, double zhi)
+        : inner(s), z0(zlo), inv((zhi - zlo) > 1e-9 ? 1.0 / (zhi - zlo) : 0.0) {}
+    double displace(const V3& p, const V3& n, const V2& uv) const override { return inner->displace(p, n, uv); }
+    std::vector<std::string> aov_names() const override { return inner->aov_names(); }
+    void shade(const V3& p, const V3& n, const V2& uv, V3* out) const override {
+        inner->shade(V3{{p[0], p[1], (p[2] - z0) * inv}}, n, uv, out);
+    }
+    double max_reach() const override { return inner->max_reach(); }
+};
+
 // The USD convention fallback for a material PrintMan cannot evaluate: no displacement, a flat
 // albedo taken (by the loader) from primvars:displayColor, else a UsdPreviewSurface constant
 // diffuseColor, else the 0.18 neutral gray. A slicer that can't run the bound shader still slices

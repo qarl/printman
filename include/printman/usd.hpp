@@ -16,6 +16,8 @@ struct UsdMaterial {
     std::string osl_disp;       // info:id of the displacement shader
     std::string osl_color;      // info:id of the surface shader
     double max_magnitude = 0;   // inputs:printman:maxMagnitude
+    bool object_space = false;  // inputs:printman:objectSpace on the surface shader -- colour sees
+                                // object-normalized Z (0 at the bottom layer, 1 at the top)
     // USD convention fallback for a material we cannot evaluate: primvars:displayColor, else a
     // UsdPreviewSurface constant diffuseColor, else the 0.18 neutral gray. Zero displacement.
     std::array<float, 3> fallback_color{{0.18f, 0.18f, 0.18f}};
