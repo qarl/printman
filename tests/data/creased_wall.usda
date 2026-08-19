@@ -1,5 +1,8 @@
 #usda 1.0
-( upAxis = "Z" )
+(
+    upAxis = "Z"
+    metersPerUnit = 0.001
+)
 # Curved tall wall (4x14 verts, Y-bulge), all-quad Catmull-Clark, with a horizontal crease (sharpness
 # 4) across the middle row. A crease sits 2+ rings from faces above/below it, and bands slice in Z --
 # so if the 1-ring halo is insufficient for creases, band=1 vs band=N diverge here.

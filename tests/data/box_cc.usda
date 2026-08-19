@@ -1,5 +1,8 @@
 #usda 1.0
-( upAxis = "Z" )
+(
+    upAxis = "Z"
+    metersPerUnit = 0.001
+)
 # Non-uniform all-quad box (40 x 8 x 8): long faces have a 40mm edge and an 8mm edge, end caps 8x8.
 # Every corner is valence-3 (extraordinary). catmullClark -> a rounded blob. Adaptive should dice the
 # 40mm direction fine and the 8mm directions coarse, crack-free across the shared tall edges.

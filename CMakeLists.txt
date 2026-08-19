@@ -72,4 +72,6 @@ if(PRINTMAN_USD)
     COMMAND printman ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/box_cc.usda --gate --bands 8 --subdiv-level 6)
   add_test(NAME creased_wall_gate
     COMMAND printman ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/creased_wall.usda --gate --bands 12 --subdiv-level 5)
+  add_test(NAME meters_scale_gate   # metersPerUnit: 0.02-unit meters cube must load as 20mm and slice
+    COMMAND printman ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/cube_meters.usda --gate --bands 8 --subdiv-level 4)
 endif()

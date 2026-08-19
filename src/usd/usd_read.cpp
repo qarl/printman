@@ -1,5 +1,8 @@
 #include "printman/usd.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3f.h>
@@ -150,26 +153,36 @@ void read_materials(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& meshPr
 // Read one Mesh prim into a cage: points baked to world space (its local-to-world transform) and
 // normalized to Z-up (yup), faces, face-varying primvars:st, and its bound material. Returns false
 // for an empty mesh (no points).
-bool read_mesh(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& prim, bool yup, UsdCage& out) {
+bool read_mesh(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& prim, bool yup, double mm_per_unit, UsdCage& out) {
     using namespace pxr;
+    const UsdTimeCode t = UsdTimeCode::EarliestTime();   // earliest authored sample if animated, else default
     UsdGeomMesh mesh(prim);
-    VtVec3fArray pts; mesh.GetPointsAttr().Get(&pts);
+    VtVec3fArray pts; mesh.GetPointsAttr().Get(&pts, t);
     if (pts.empty()) return false;
 
-    // Bake the prim's world transform, then normalize the stage up-axis to Z (Y-up -> +90 deg
-    // about X: (x,y,z)->(x,-z,y)). Normals are recomputed downstream from the baked positions.
-    GfMatrix4d m2w = UsdGeomXformable(prim).ComputeLocalToWorldTransform(UsdTimeCode::Default());
+    // Bake the prim's world transform, SCALE to mm (stage metersPerUnit -> mm_per_unit), then normalize
+    // the up-axis to Z (Y-up -> +90 deg about X: (x,y,z)->(x,-z,y)). Normals are recomputed downstream.
+    // Reject a non-finite point rather than emit NaN geometry.
+    GfMatrix4d m2w = UsdGeomXformable(prim).ComputeLocalToWorldTransform(t);
+    TfToken orient; mesh.GetOrientationAttr().Get(&orient, t);
+    const bool flip = (m2w.GetDeterminant() < 0.0) != (orient == UsdGeomTokens->leftHanded);
     out.points.reserve(pts.size());
     for (const auto& p : pts) {
-        GfVec3d w = m2w.Transform(GfVec3d(p[0], p[1], p[2]));
+        GfVec3d w = m2w.Transform(GfVec3d(p[0], p[1], p[2])) * mm_per_unit;
+        if (!std::isfinite(w[0]) || !std::isfinite(w[1]) || !std::isfinite(w[2])) return false;
         out.points.push_back(yup ? std::array<double, 3>{w[0], -w[2], w[1]}
                                  : std::array<double, 3>{w[0], w[1], w[2]});
     }
     VtIntArray counts, indices;
-    mesh.GetFaceVertexCountsAttr().Get(&counts);
-    mesh.GetFaceVertexIndicesAttr().Get(&indices);
+    mesh.GetFaceVertexCountsAttr().Get(&counts, t);
+    mesh.GetFaceVertexIndicesAttr().Get(&indices, t);
     out.counts.assign(counts.begin(), counts.end());
     out.indices.assign(indices.begin(), indices.end());
+    // Validate topology: every face >= 3 verts, counts sum to the index count, indices in range.
+    long long sum = 0; for (int c : out.counts) { if (c < 3) return false; sum += c; }
+    if (sum != (long long)out.indices.size()) return false;
+    const int np = (int)out.points.size();
+    for (int i : out.indices) if (i < 0 || i >= np) return false;
 
     TfToken scheme; mesh.GetSubdivisionSchemeAttr().Get(&scheme);
     if (!scheme.IsEmpty()) out.subdiv_scheme = scheme.GetString();
@@ -200,6 +213,18 @@ bool read_mesh(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& prim, bool 
         else { out.st.reserve(vals.size()); for (const auto& v : vals) out.st.push_back({v[0], v[1]}); }
     }
 
+    // Left-handed authored orientation, or a mirroring (det<0) world transform: reverse each face's
+    // winding (and its face-varying st) so faces stay CCW-outward for the winding-derived normals and
+    // the non-zero fill. Crease/corner tags are point indices, unaffected by winding.
+    if (flip) {
+        size_t o = 0; const bool hasst = out.st.size() == out.indices.size();
+        for (int c : out.counts) {
+            std::reverse(out.indices.begin() + o, out.indices.begin() + o + c);
+            if (hasst) std::reverse(out.st.begin() + o, out.st.begin() + o + c);
+            o += (size_t)c;
+        }
+    }
+
     read_materials(stage, prim, pv.GetPrimvar(TfToken("displayColor")), out);
     return true;
 }
@@ -216,6 +241,9 @@ bool load_usd_scene(const std::string& path, const std::string& plugin_dir,
     TfToken up = UsdGeomGetStageUpAxis(stage);
     const bool yup = (up == UsdGeomTokens->y);
     const std::string upstr = up.GetString();
+    // Stage units -> mm. USD authors in metersPerUnit (default 0.01 = cm); mm = unit * metersPerUnit * 1000.
+    double mm_per_unit = UsdGeomGetStageMetersPerUnit(stage) * 1000.0;
+    if (!(mm_per_unit > 0.0)) mm_per_unit = 10.0;   // guard an unset/zero metersPerUnit (USD default cm)
 
     skipped = 0;
     for (const UsdPrim& p : stage->Traverse()) {
@@ -226,7 +254,7 @@ bool load_usd_scene(const std::string& path, const std::string& plugin_dir,
         if (purpose == UsdGeomTokens->proxy || purpose == UsdGeomTokens->guide) { ++skipped; continue; }
         if (img.ComputeVisibility() == UsdGeomTokens->invisible) { ++skipped; continue; }
         UsdCage c; c.up_axis = upstr;
-        if (read_mesh(stage, p, yup, c)) out.push_back(std::move(c));
+        if (read_mesh(stage, p, yup, mm_per_unit, c)) out.push_back(std::move(c));
         else ++skipped;
     }
     if (out.empty()) { err = "no printable Mesh prim in " + path; return false; }
