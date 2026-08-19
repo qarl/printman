@@ -105,7 +105,8 @@ std::unique_ptr<Shader> make_shader(const UsdMaterial& mtl, const std::string& s
 int run_usd(const std::string& usd_in, const std::string& out, const std::string& aovname,
             double layer, double ppm, int subdiv_level, const std::string& shaderdir,
             const std::string& osl_disp, const std::string& osl_color, double reach, double amp,
-            bool stack, bool quad, int bg, int rres, double line_width) {
+            bool stack, bool quad, int bg, int rres, double line_width,
+            const std::vector<RGBColor>& palette, bool dither) {
     (void)amp;
     std::vector<UsdCage> meshes; std::string err; int skipped = 0;
     if (!load_usd_scene(usd_in, PRINTMAN_USD_PLUGINDIR, meshes, skipped, err)) { std::fprintf(stderr, "printman: %s\n", err.c_str()); return 1; }
@@ -197,7 +198,9 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
     size_t nbands_total = 0, unique_tri = 0; bool any_banded = false;
     for (size_t i = 0; i < meshes.size(); ++i) {
         auto renderhook = [&](const Mesh& bm) {
-            for (int ci = 0; ci < ncam; ++ci) render_into(frames[ci], zbufs[ci], bm, cams[ci], cout_k, true, true);
+            const Mesh* rm = &bm; Mesh q;   // filament-quantize the preview when a palette is given
+            if (!palette.empty()) { q = bm; quantize_cout(q, palette, cout_k, dither); rm = &q; }
+            for (int ci = 0; ci < ncam; ++ci) render_into(frames[ci], zbufs[ci], *rm, cams[ci], cout_k, true, true);
         };
         double md = 0; for (const Shader* s : shaders[i]) md = std::max(md, s->max_reach());
         const std::string& sc = meshes[i].subdiv_scheme;
@@ -329,7 +332,8 @@ int main(int argc, char** argv) {
     double layer = 0.1, ppm = 8.0, R = 20.0, amp = 6.0, reach = 0;
     int nu = 180, nv = 90, bands = 8, subdiv_level = -1, rres = 700;   // subdiv -1 = auto (per-output)
     double line_width = 0.4;
-    bool gate = false, stack = false, quad = false, white = false;
+    bool gate = false, stack = false, quad = false, white = false, dither = false;
+    std::vector<RGBColor> palette;   // --palette rrggbb,rrggbb,... : filament colours to quantize to
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : ""; };
@@ -351,6 +355,17 @@ int main(int argc, char** argv) {
         else if (a == "--reach") reach = std::atof(next().c_str());
         else if (a == "--subdiv-level") subdiv_level = std::atoi(next().c_str());
         else if (a == "--line-width") line_width = std::atof(next().c_str());
+        else if (a == "--dither") dither = true;
+        else if (a == "--palette") {   // "rrggbb,rrggbb,..." hex filament colours
+            std::string s = next();
+            for (size_t p = 0; p < s.size();) {
+                size_t e = s.find(',', p);
+                std::string h = s.substr(p, e == std::string::npos ? std::string::npos : e - p);
+                if (h.size() >= 6) { auto hx = [&](int o){ return (unsigned char)std::stoi(h.substr(o, 2), nullptr, 16); };
+                    palette.push_back(RGBColor(hx(0), hx(2), hx(4))); }
+                if (e == std::string::npos) break; p = e + 1;
+            }
+        }
         else if (a == "--help") { usage(); return 0; }
         else if (!a.empty() && a[0] != '-') usd_in = a;  // positional: a USD scene
     }
@@ -360,7 +375,7 @@ int main(int argc, char** argv) {
 #ifdef PRINTMAN_USD
         if (gate)
             return run_usd_gate(usd_in, shaderdir, osl_disp, osl_color, reach, layer, ppm, subdiv_level, bands);
-        return run_usd(usd_in, out, aovname, layer, ppm, subdiv_level, shaderdir, osl_disp, osl_color, reach, amp, stack, quad, bg, rres, line_width);
+        return run_usd(usd_in, out, aovname, layer, ppm, subdiv_level, shaderdir, osl_disp, osl_color, reach, amp, stack, quad, bg, rres, line_width, palette, dither);
 #else
         std::fprintf(stderr, "printman: built without USD (configure -DPRINTMAN_USD=ON)\n"); return 1;
 #endif

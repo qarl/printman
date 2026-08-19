@@ -10,15 +10,38 @@
 #include <vector>
 
 #include "printman/geom.hpp"
+#include "printman/palette.hpp"
 
 namespace printman {
 
 struct Seg {
     V2 a, b;                 // endpoints in the XY plane (mm)
     std::vector<V3> va, vb;  // per-AOV values at a, b (same order as Mesh::aov_names)
+    int filament = -1;       // classified filament index (classify_layers), -1 = unclassified
 };
 
 using LayerSegs = std::vector<Seg>;
+
+// Classify each segment to a filament from its midpoint Cout (linear RGB), by DeltaE2000 nearest, or
+// dithered across the palette (spatial hash of the segment midpoint at the layer z). This is the
+// CORE, host-neutral colour decision -- "which filament here"; the sink owns "where to lay it down"
+// (the wall-claim). cout_k is the Cout AOV index; palette is the loaded filament colours (sRGB bytes).
+inline void classify_layers(std::vector<LayerSegs>& layers, const std::vector<double>& zs,
+                            const std::vector<RGBColor>& palette, int cout_k,
+                            bool dither = false, double dither_cell = 0.5) {
+    if (palette.empty() || cout_k < 0) return;
+    for (size_t li = 0; li < layers.size(); ++li) {
+        const double z = li < zs.size() ? zs[li] : 0.0;
+        for (auto& s : layers[li]) {
+            if (cout_k >= (int)s.va.size() || cout_k >= (int)s.vb.size()) continue;
+            const V3& ca = s.va[cout_k]; const V3& cb = s.vb[cout_k];
+            V3 c{{(ca[0]+cb[0])*0.5, (ca[1]+cb[1])*0.5, (ca[2]+cb[2])*0.5}};
+            s.filament = dither
+                ? dither_filament(c, palette, dither_hash(V3{{(s.a[0]+s.b[0])*0.5, (s.a[1]+s.b[1])*0.5, z}}, dither_cell))
+                : nearest_filament(c, palette);
+        }
+    }
+}
 
 inline std::vector<LayerSegs> slice_mesh(const Mesh& m, const std::vector<double>& zs) {
     const int na = int(m.aov.size());

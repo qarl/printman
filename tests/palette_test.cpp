@@ -5,6 +5,7 @@
 #include <cmath>
 #include <vector>
 #include "printman/palette.hpp"
+#include "printman/slicer.hpp"
 using namespace printman;
 
 int main() {
@@ -36,6 +37,18 @@ int main() {
     bool nfo = (nf == 0);
     printf("nearest_filament(red)=%d (expect 0)  %s\n", nf, nfo ? "ok" : "*** FAIL ***");
     fails += !nfo;
+
+    // classify_layers in-pipeline: a red segment tags filament 0, a green one tags filament 1 (Cout = AOV 0).
+    {
+        Seg red, grn;
+        red.va = std::vector<V3>{V3{{0.8, 0.02, 0.02}}}; red.vb = red.va;
+        grn.va = std::vector<V3>{V3{{0.02, 0.8, 0.02}}}; grn.vb = grn.va;
+        std::vector<LayerSegs> layers(1); layers[0] = {red, grn};
+        classify_layers(layers, std::vector<double>{0.1}, pal, /*cout_k*/ 0);
+        bool cok = layers[0][0].filament == 0 && layers[0][1].filament == 1;
+        printf("classify_layers: red->%d grn->%d (expect 0,1)  %s\n", layers[0][0].filament, layers[0][1].filament, cok ? "ok" : "*** FAIL ***");
+        fails += !cok;
+    }
 
     printf("%s\n", fails == 0 ? "PASS: colour-classify math validated" : "*** colour math FAILED ***");
     return fails ? 1 : 0;

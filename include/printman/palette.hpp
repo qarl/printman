@@ -128,4 +128,20 @@ inline int dither_filament(const V3& lin, const std::vector<RGBColor>& palette, 
     return n - 1;
 }
 
+// Overwrite each vertex's Cout AOV with its nearest-filament colour (linear) -- a filament-quantized
+// preview of the surface colour (what an FDM print would reproduce with this palette). cout_k is the
+// Cout AOV index; dither spreads the choice spatially so the eye area-averages toward the true colour.
+inline void quantize_cout(Mesh& m, const std::vector<RGBColor>& palette, int cout_k,
+                          bool dither = false, double cell = 0.5) {
+    if (palette.empty() || cout_k < 0 || cout_k >= (int)m.aov.size()) return;
+    auto& A = m.aov[cout_k];
+    for (size_t v = 0; v < A.size(); ++v) {
+        V3 c{{A[v][0], A[v][1], A[v][2]}};
+        int f = dither ? dither_filament(c, palette, dither_hash(V3{{m.pos[v][0], m.pos[v][1], m.pos[v][2]}}, cell))
+                       : nearest_filament(c, palette);
+        V3 lin = linear_from_srgb(palette[f]);
+        A[v] = {{(float)lin[0], (float)lin[1], (float)lin[2]}};
+    }
+}
+
 }  // namespace printman
