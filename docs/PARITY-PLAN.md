@@ -92,9 +92,17 @@ Bigger than G1+G2+G3 combined. The pipeline is three stages, and the split is th
   sRGB8→CIELAB **DeltaE2000**) `nearest_filament` or Frank-Wolfe `dither_filament`. This is pure
   scalar colour math (`Palette.hpp` is a near-verbatim port; only `RGBColor` is a trivial neutral
   swap). Carry the result as a **filament tag on the slicer's `Seg`** (the natural extension of the
-  per-segment `Cout` it already carries band-invariantly). Also port the scene-level directives
-  rev. 1 omitted: `color_object_space` (object-Z remap of the shader input), `color_all_filaments`/
-  `resolved_filaments`, `color_dither`.
+  per-segment `Cout` it already carries band-invariantly). Also port the **exactly three** scene hints
+  the fork reads as `inputs:printman:*` on the RESOLVED SURFACE shader (verified 2026-08-19 vs fork
+  `USD.cpp:428-430` / `PrintManScene.hpp:66-92`): `objectSpace` (object-Z-normalized colour-input
+  remap, 0=bottom-layer..1=top), `dither` (spatial dither across nearest filaments), `allFilaments`
+  (dither across the whole loaded palette). The fork reads **NO** scene-authored filament palette —
+  `resolved_filaments` derives from Orca's LOADED filament config at slice time, not the USD, so there
+  is nothing palette-side to match. (The standalone already reads MORE on the fallback side —
+  `primvars:displayColor` + `UsdPreviewSurface` `diffuseColor` — which the fork does not.) `dither`/
+  `allFilaments` ARE the dither feature: **gated behind a physical swatch print** (preview != print),
+  so do NOT build them before Karl validates a swatch. `objectSpace` is a deterministic input remap
+  (no §4.2/print dependency) and could land independently if colour is prioritized.
 - **Coverage / wall-claim (sink-native — do NOT put a clipper in the core):** the `wall_depth`
   outer-wall claim is **host-perimeter geometry** — its depth is the print's Flow
   (`0.5·ext.width + ext.spacing + peri.spacing·(loops−1)`), and it runs on ordered, disjoint 2D
@@ -134,8 +142,10 @@ the chosen model afterward:
    normal, average the displacement vectors per shared vertex (auto-damping at concave/hard edges).
    Both stay **band-invariant**: the poly path adds a 1-ring halo so a shared vertex's average is
    band-independent (gate `poly_face_average` proves damping + band1==bandN). So band-independence and
-   edge-damping are **not** in tension — we get both. Still to do: rewrite the Python oracle
-   (`harness.py`) to the per-face-average rule before diffing the poly path against it.
+   edge-damping are **not** in tension — we get both. Oracle: **no rewrite needed** — `harness.py`
+   already implements per-face-average (flat per-face normals, averaged `d·n`, `harness.py:55-68`), so
+   the new poly path already matches it; the only remaining oracle work would be a *committed*
+   poly-displacement diff case (the rule agrees; coverage is what's missing).
 2. **Cout sampling: per-face centroid (fork) vs per-vertex/per-segment (standalone).** Load-bearing:
    it relocates which filament wins the sub-line-width outer wall — exactly the sphere/cube coverage
    that was tuned. The architecture review argues per-segment is the neutral-native, more-precise
