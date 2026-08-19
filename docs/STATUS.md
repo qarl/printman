@@ -44,7 +44,9 @@ Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what'
     (subdiv cages) and `amplify_poly_banded` (polygons) subdivide → displace → slice **one Z-band at
     a time and discard** — memory-bounded, never materializing the whole refined surface. Localized
     Catmull-Clark refinement (a core face + its 1-ring halo refines bit-identically to a whole-cage
-    refinement) plus **halo-inclusive per-vertex normals** make displacement band-independent.
+    refinement) makes the **subdiv** path band-independent; the **polygon** path welds its diced
+    micro-mesh and per-face-averages displacement over a matching 1-ring halo, so both slice the same
+    regardless of band count.
     `printman scene.usda --gate --bands N` proves **band-count=1 == band-count=N** pixel-identically
     (catmullClark meshes, 0 differing subpixels) — the USD counterpart of the sphere gate.
 14. **Incremental per-band render.** `render_into` accumulates into a shared frame/z-buffer, so the
@@ -58,14 +60,20 @@ Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what'
     displacement shader) — non-subdiv polygons are **diced into micropolygons and displaced**, not left
     flat. **Every polygon dices adaptively** (`amplify_poly_banded`): each face splits to its own edge
     scale (`edge_segments(len, tol)`), crack-free — segment counts are **edge-intrinsic** so shared
-    edges agree, boundary params snap to the shared count, and per-control-vertex normals are shared
-    across faces so a displaced boundary matches on both sides. Quads dice directly as an (Ns×Nt) grid;
+    edges agree, boundary params snap to the shared count, and the diced micro-mesh is **welded by
+    position**. Displacement follows Karl's **per-face-average** rule: each micro-triangle is shaded
+    at its corners with that triangle's **flat** normal and the displacement vectors are averaged per
+    welded vertex, so a polygon keeps its facets, a shared boundary is one crack-free position, and a
+    hard/concave edge **auto-damps** (its incident normals diverge, shrinking the averaged vector); a
+    **1-ring halo** completes each average band-independently. Quads dice directly as an (Ns×Nt) grid;
     **triangles and n-gons are center-split** into one quad per corner (centroid + edge midpoints, the
     first step of USD bilinear/Catmull-Clark refinement) and diced by the same routine — a shared
     original edge is halved identically from both sides, so the seam still matches. A mesh dices
     uniformly (all-quad → direct; any non-quad → center-split every face, so mixed quad/tri stays
     crack-free too). Verified watertight on a 2/18/20 mm quad strip and on triangle/pentagon/mixed
-    cases: the odd-count (boundary) edges trace the outline exactly, no interior gaps.
+    cases: the odd-count (boundary) edges trace the outline exactly, no interior gaps. Gate
+    `poly_face_average` proves the damping (a tent ridge moves 0.707 of a face interior) and
+    band1==bandN on a banding-stressed accordion that forces the 1-ring halo.
 17. **Adaptive Catmull-Clark** (`amplify_usd_adaptive`) — each control face dices to its OWN edge
     scale, not one global level. The band region still refines uniformly to the global level (so a
     core face's refined vertices are bit-identical across bands, keeping the invariance gate pixel-
@@ -109,10 +117,11 @@ printman scene.usda --gate --bands 8                       # USD band-invariance
    cage; a cage with a triangle/n-gon control face (e.g. a UV sphere's poles) falls back to the uniform
    band loop. Extend by center-splitting non-quad control faces (as the polygon path does) so their
    corner-quads get the lattice-subsample treatment too.
-2. **UV-seam / material-boundary displacement weld.** Per-corner displacement can crack at
-   *non-periodic* UV seams (earth is periodic, fine), and a boundary between two subsets with
-   *different* displacement can gap (colour-only subsets are crack-free). Reference: the fork's
-   per-face-average one-position-per-vertex weld.
+2. **Material-boundary displacement weld.** DONE for the single-material case (`printman@67c46ee`):
+   the polygon path welds its micro-mesh by position and per-face-averages, so a non-periodic UV seam
+   *within one material* blends crack-free. STILL open: a boundary between two subsets with *different*
+   displacement shaders can gap, because each material welds separately (colour-only subsets, which
+   share the displacement, are already crack-free).
 3. **Texture fidelity follow-ups** (`texshader.hpp`): honor the `st` transform (scale/bias/rotate),
    wrap modes beyond repeat, and non-`st` primvar names. Albedo only by design (no roughness/metallic/normal).
 4. **Colour→filament is a sink/host step** (design §5): the core carries albedo RGB (Cout AOV);

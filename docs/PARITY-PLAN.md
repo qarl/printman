@@ -125,13 +125,17 @@ disjoint) band loop parallelizable. TBB and the cap are host concerns.
 These are genuine behavioural forks, not sub-tolerance nuances, and the oracle must be rewritten to
 the chosen model afterward:
 
-1. **Displacement normal model.** Fork/oracle: per-face-average of `d·n` at the **flat** face normal
-   ("auto-damping at edges", Karl 2026-08-12 — it *shrinks* displacement at concave features,
-   guarding fold-over). Standalone: one eval per vertex at the **smooth** band-independent normal
-   (what makes the invariance gate + adaptive dicing possible). They diverge **full-depth** on
-   normal-sensitive shaders. This is a real tradeoff — band-independence/invariance vs edge-damping/
-   fold-safety — and it is **Karl's call**. Whatever wins, the Python oracle (`harness.py`) is
-   rewritten to it, and the fork adopts it (its output legitimately changes).
+1. **Displacement normal model — SETTLED (Karl, 2026-08-19), and implemented at `printman@67c46ee`.**
+   The rev.1 framing (smooth *vs* per-face-average, one must win) was a false dichotomy. Karl's rule
+   keys on surface type: a **subdivision surface is smooth**, so the CC path (`amplify_usd_adaptive`)
+   keeps the halo-inclusive **limit normal**; a **simple polygon mesh is faceted**, so the poly path
+   (`amplify_poly_banded`) uses the **per-face-average of `d·n` at the flat face normal** — weld the
+   diced micro-mesh by position, shade each micro-triangle at its corners with that triangle's flat
+   normal, average the displacement vectors per shared vertex (auto-damping at concave/hard edges).
+   Both stay **band-invariant**: the poly path adds a 1-ring halo so a shared vertex's average is
+   band-independent (gate `poly_face_average` proves damping + band1==bandN). So band-independence and
+   edge-damping are **not** in tension — we get both. Still to do: rewrite the Python oracle
+   (`harness.py`) to the per-face-average rule before diffing the poly path against it.
 2. **Cout sampling: per-face centroid (fork) vs per-vertex/per-segment (standalone).** Load-bearing:
    it relocates which filament wins the sub-line-width outer wall — exactly the sphere/cube coverage
    that was tuned. The architecture review argues per-segment is the neutral-native, more-precise
@@ -168,7 +172,7 @@ the chosen model afterward:
    to the fork in parallel (decoupled, the Orca-facing value).
 1. **G7 (reader) + G2 (creases) + G1 (instancing)** — *minimal parity to slice real USD correctly*;
    the highest-value, correctness-critical block. Gate on the new fixtures.
-2. **§4.1 normal decision** (Karl) → rewrite the oracle → reconcile.
+2. **§4.1 normal decision** — SETTLED + implemented (`printman@67c46ee`); still owe the oracle rewrite.
 3. **G4 colour** — classify-in-core + host-side wall-claim; blocked on §4.2 + a print-validated
    golden. G3 footprint folded in **only** when a textured-colour fixture appears.
 4. **G6 seam + G5 weld-check** — cheap, any time.
@@ -177,9 +181,8 @@ the chosen model afterward:
 
 ## 8. Decisions for Karl
 
-1. **Normal model (§4.1)** — band-independent smooth (my lean: it's what the invariance gate/adaptive
-   need) vs your 2026-08-12 per-face-average flat-normal edge-damping (fold-safety at concave
-   features). This one genuinely reopens a call you made; I'm flagging it, not overriding it.
+1. **Normal model (§4.1)** — SETTLED by you 2026-08-19 (subdivs smooth-limit, simple meshes
+   per-face-average) and now implemented + gated. No longer open.
 2. **Cout sampling (§4.2)** — per-segment (neutral-native, my lean) vs per-face centroid.
 3. **Parity scope** — minimal (G7+G2+G1: slice real models correctly) now, with colour (G4) deferred?
    Or is colour in the near-term parity target?
