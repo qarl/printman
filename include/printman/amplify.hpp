@@ -86,9 +86,9 @@ inline void drop_to_plate(Mesh& m) {
 // across a boundary); a boundary between differently-displacing subsets can gap -- rare, noted.
 inline Mesh amplify_usd(const UsdCage& uc, const std::vector<const Shader*>& shaders, int level) {
     subdiv::Cage c = subdiv::build_cage(uc.points, uc.counts, uc.indices,
-                                        /*creaseIndices*/ {}, /*creaseLengths*/ {}, /*creaseSharp*/ {},
-                                        /*cornerIndices*/ {}, /*cornerSharp*/ {},
-                                        subdiv::BOUNDARY_EDGE_AND_CORNER, /*triangle_smooth*/ false, uc.st);
+                                        uc.crease_indices, uc.crease_lengths, uc.crease_sharpnesses,
+                                        uc.corner_indices, uc.corner_sharpnesses,
+                                        uc.boundary, uc.triangle_smooth, uc.st);
 
     // Subdivide level-by-level, carrying the per-face material tag through each step.
     std::vector<int> tag = uc.face_material.empty() ? std::vector<int>(c.nfaces(), 0) : uc.face_material;

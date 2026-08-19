@@ -58,7 +58,7 @@ endif()
 # The unit harnesses build their cages in code (no USD/OSL), so they compile and run everywhere and
 # guard the crown-jewel invariants: crack-free adaptive dicing and pixel-exact band-count invariance.
 enable_testing()
-foreach(t poly_watertight adaptive_cc open_cc)
+foreach(t poly_watertight adaptive_cc open_cc crease_invariance)
   add_executable(${t}_test tests/${t}_test.cpp)
   target_include_directories(${t}_test PRIVATE include third_party)
   target_compile_options(${t}_test PRIVATE -Wall -Wextra)
@@ -70,4 +70,6 @@ add_test(NAME sphere_gate COMMAND printman --gate --bands 8)
 if(PRINTMAN_USD)
   add_test(NAME box_cc_gate
     COMMAND printman ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/box_cc.usda --gate --bands 8 --subdiv-level 6)
+  add_test(NAME creased_wall_gate
+    COMMAND printman ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/creased_wall.usda --gate --bands 12 --subdiv-level 5)
 endif()

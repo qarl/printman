@@ -42,8 +42,10 @@ inline std::vector<LayerSegs> amplify_usd_banded(const UsdCage& uc,
     const size_t nz = zs.size();
     if (nz == 0 || nbands < 1) return out;
 
-    subdiv::Cage cage = subdiv::build_cage(uc.points, uc.counts, uc.indices, {}, {}, {}, {}, {},
-                                           subdiv::BOUNDARY_EDGE_AND_CORNER, false, uc.st);
+    subdiv::Cage cage = subdiv::build_cage(uc.points, uc.counts, uc.indices,
+                                           uc.crease_indices, uc.crease_lengths, uc.crease_sharpnesses,
+                                           uc.corner_indices, uc.corner_sharpnesses,
+                                           uc.boundary, uc.triangle_smooth, uc.st);
     const auto vf = subdiv::vertex_faces(cage);
     const int nf = cage.nfaces();
 
@@ -161,8 +163,10 @@ inline std::vector<LayerSegs> amplify_usd_adaptive(const UsdCage& uc,
     const int Lg = std::max(level, 0);
     const int S = 1 << Lg;                       // segments per side at the global level
 
-    subdiv::Cage cage = subdiv::build_cage(uc.points, uc.counts, uc.indices, {}, {}, {}, {}, {},
-                                           subdiv::BOUNDARY_EDGE_AND_CORNER, false, uc.st);
+    subdiv::Cage cage = subdiv::build_cage(uc.points, uc.counts, uc.indices,
+                                           uc.crease_indices, uc.crease_lengths, uc.crease_sharpnesses,
+                                           uc.corner_indices, uc.corner_sharpnesses,
+                                           uc.boundary, uc.triangle_smooth, uc.st);
     const auto vf = subdiv::vertex_faces(cage);
     const int nf = cage.nfaces();
 
@@ -314,8 +318,10 @@ inline size_t usd_adaptive_tri_estimate(const UsdCage& uc, int level, double tol
 // (Engine.cpp's band_layers_for), then ceil(nlayers / band_layers).
 inline int usd_band_count(const UsdCage& uc, const std::vector<double>& zs) {
     if (zs.size() < 2) return 1;
-    subdiv::Cage cage = subdiv::build_cage(uc.points, uc.counts, uc.indices, {}, {}, {}, {}, {},
-                                           subdiv::BOUNDARY_EDGE_AND_CORNER, false, uc.st);
+    subdiv::Cage cage = subdiv::build_cage(uc.points, uc.counts, uc.indices,
+                                           uc.crease_indices, uc.crease_lengths, uc.crease_sharpnesses,
+                                           uc.corner_indices, uc.corner_sharpnesses,
+                                           uc.boundary, uc.triangle_smooth, uc.st);
     const auto vf = subdiv::vertex_faces(cage);
     double max_span = 0;
     for (int f = 0; f < cage.nfaces(); ++f) {

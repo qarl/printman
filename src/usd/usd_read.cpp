@@ -174,6 +174,22 @@ bool read_mesh(const pxr::UsdStageRefPtr& stage, const pxr::UsdPrim& prim, bool 
     TfToken scheme; mesh.GetSubdivisionSchemeAttr().Get(&scheme);
     if (!scheme.IsEmpty()) out.subdiv_scheme = scheme.GetString();
 
+    // Semi-sharp subdivision tags. Crease/corner indices are point indices, unaffected by the world
+    // bake above. sharpnesses read as float -> stored double. Only Catmull-Clark uses them downstream.
+    { VtIntArray ci, cl; VtFloatArray cs;
+      mesh.GetCreaseIndicesAttr().Get(&ci); mesh.GetCreaseLengthsAttr().Get(&cl); mesh.GetCreaseSharpnessesAttr().Get(&cs);
+      out.crease_indices.assign(ci.begin(), ci.end());
+      out.crease_lengths.assign(cl.begin(), cl.end());
+      out.crease_sharpnesses.assign(cs.begin(), cs.end()); }
+    { VtIntArray ci; VtFloatArray cs;
+      mesh.GetCornerIndicesAttr().Get(&ci); mesh.GetCornerSharpnessesAttr().Get(&cs);
+      out.corner_indices.assign(ci.begin(), ci.end());
+      out.corner_sharpnesses.assign(cs.begin(), cs.end()); }
+    { TfToken ib; mesh.GetInterpolateBoundaryAttr().Get(&ib);   // default (unauthored) -> edgeAndCorner
+      out.boundary = (ib == UsdGeomTokens->none) ? 0 : (ib == UsdGeomTokens->edgeOnly) ? 1 : 2; }
+    { TfToken tr; mesh.GetTriangleSubdivisionRuleAttr().Get(&tr);
+      out.triangle_smooth = (tr == UsdGeomTokens->smooth); }
+
     // primvars:st -> face-varying UV parallel to indices
     UsdGeomPrimvarsAPI pv(prim);
     UsdGeomPrimvar st = pv.GetPrimvar(TfToken("st"));

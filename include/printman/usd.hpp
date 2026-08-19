@@ -37,6 +37,18 @@ struct UsdCage {
     // them (empty -> every face uses material 0). Subsets refine per-face; index 0 covers the rest.
     std::vector<UsdMaterial> materials;
     std::vector<int> face_material;         // size counts.size() when subsets exist, else empty
+    // Semi-sharp subdivision tags (Catmull-Clark). crease_indices are vertex-index chains grouped by
+    // crease_lengths; crease_sharpnesses is one per chain or one per edge. corner_indices/sharpnesses
+    // tag sharp vertices. boundary is UsdGeom interpolateBoundary (0 none / 1 edgeOnly / 2 edgeAndCorner
+    // -- matches subdiv::BOUNDARY_*). triangle_smooth is triangleSubdivisionRule == "smooth". The
+    // defaults below (empty tags, edgeAndCorner, non-smooth) reproduce the old hard-coded build_cage
+    // args exactly, so a smooth cage is unchanged.
+    std::vector<int> crease_indices, crease_lengths;
+    std::vector<double> crease_sharpnesses;
+    std::vector<int> corner_indices;
+    std::vector<double> corner_sharpnesses;
+    int boundary = 2;              // subdiv::BOUNDARY_EDGE_AND_CORNER
+    bool triangle_smooth = false;  // triangleSubdivisionRule == "smooth"
 };
 
 // Load every renderable Mesh prim (each with its own bound material) from a USD file, as a vector
