@@ -231,8 +231,8 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
                 L = amplify_poly_banded(meshes[i], shaders[i], slice_tol, zs, nb, {}, true);
                 amplify_poly_banded(meshes[i], shaders[i], render_tol, zs, nb, renderhook, /*do_slice*/ false);
             }
-        } else if (sc == "catmullClark" && all_quads(meshes[i])) {   // subdiv surface -> ADAPTIVE per-face dicing
-            any_banded = true;
+        } else if (sc == "catmullClark") {                  // subdiv surface -> ADAPTIVE per-face dicing
+            any_banded = true;                              // any cage: a non-quad one is made all-quad by one CC step inside
             unique_tri += usd_adaptive_tri_estimate(meshes[i], slice_level, slice_tol);
             int nb = std::max(1, usd_band_count(meshes[i], zs));
             if (slice_level == render_level && slice_tol == render_tol) {
@@ -242,19 +242,6 @@ int run_usd(const std::string& usd_in, const std::string& out, const std::string
                 nbands_total += 2 * nb;
                 L = amplify_usd_adaptive(meshes[i], shaders[i], slice_level, slice_tol, zs, nb, {}, true);
                 amplify_usd_adaptive(meshes[i], shaders[i], render_level, render_tol, zs, nb, renderhook, /*do_slice*/ false);
-            }
-        } else if (sc == "catmullClark") {                  // non-quad control cage -> uniform-level band loop
-            any_banded = true;
-            size_t corners = 0; for (int c : meshes[i].counts) corners += (size_t)c;
-            unique_tri += (slice_level >= 1) ? corners * (size_t(1) << (2 * (slice_level - 1))) * 2 : corners - 2 * meshes[i].counts.size();
-            int nb = std::max(1, usd_band_count(meshes[i], zs));
-            if (slice_level == render_level) {
-                nbands_total += nb;
-                L = amplify_usd_banded(meshes[i], shaders[i], slice_level, zs, nb, renderhook, /*do_slice*/ true);
-            } else {
-                nbands_total += 2 * nb;
-                L = amplify_usd_banded(meshes[i], shaders[i], slice_level, zs, nb, {}, true);
-                amplify_usd_banded(meshes[i], shaders[i], render_level, zs, nb, renderhook, /*do_slice*/ false);
             }
         } else {
             size_t corners = 0; for (int c : meshes[i].counts) corners += (size_t)c;
@@ -310,10 +297,11 @@ int run_usd_gate(const std::string& usd_in, const std::string& shaderdir, const 
     double span = std::max(x1 - x0, y1 - y0) + 2 * max_disp;
     Frame win = window_for(span, span, (x0 + x1) / 2, (y0 + y1) / 2, ppm, 2);
 
-    // All-quad cages ship the ADAPTIVE path, so gate that. Derive a tol that maps the longest control
-    // edge to `level` and shorter edges below it, so per-face levels genuinely vary (stresses the
-    // crack-free boundary snapping) while band=1 and band=N still share one tol.
-    const bool adaptive = all_quads(uc);
+    // Every catmullClark cage now ships the ADAPTIVE path (a non-quad one via one CC pre-step), so
+    // gate that. Derive a tol that maps the longest control edge to `level` and shorter edges below it,
+    // so per-face levels genuinely vary (stresses the crack-free boundary snapping) while band=1 and
+    // band=N still share one tol.
+    const bool adaptive = true;
     double me = 0; { for (size_t f = 0, o = 0; f < uc.counts.size(); o += uc.counts[f], ++f)
         for (int k = 0; k < uc.counts[f]; ++k) { const auto& a = uc.points[uc.indices[o+k]]; const auto& b = uc.points[uc.indices[o + (k+1 < uc.counts[f] ? k+1 : 0)]];
             me = std::max(me, std::sqrt((a[0]-b[0])*(a[0]-b[0])+(a[1]-b[1])*(a[1]-b[1])+(a[2]-b[2])*(a[2]-b[2]))); } }

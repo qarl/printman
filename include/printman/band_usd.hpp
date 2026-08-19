@@ -151,9 +151,10 @@ inline std::vector<LayerSegs> amplify_usd_banded(const UsdCage& uc,
 // edge gives both faces the same level and the same lattice nodes, so the seam matches (crack-free),
 // while a large flat face emits far fewer micropolygons. The (2^level+1)^2 vertex lattice is read off
 // a TEMPLATE (a single parametric quad refined once: fvar refines to an exact dyadic (i,j), and the
-// quad-child ordering is universal), so no per-band parametric pass is needed. ALL-QUAD control cages
-// only -- a cage with any non-quad control face uses the uniform amplify_usd_banded path, since
-// crack-free needs one dicing discipline across the whole mesh.
+// quad-child ordering is universal), so no per-band parametric pass is needed. A non-quad control
+// cage is made all-quad by ONE Catmull-Clark step first (its limit surface is unchanged, since
+// subdivision is associative), after which the same all-quad machinery dices it -- so any subdiv cage
+// (UV-sphere poles, n-gons) gets adaptive dicing, not the uniform fallback.
 inline std::vector<LayerSegs> amplify_usd_adaptive(const UsdCage& uc,
         const std::vector<const Shader*>& shaders, int level, double tol,
         const std::vector<double>& zs, int nbands,
@@ -161,13 +162,33 @@ inline std::vector<LayerSegs> amplify_usd_adaptive(const UsdCage& uc,
     std::vector<LayerSegs> out(zs.size());
     const size_t nz = zs.size();
     if (nz == 0 || nbands < 1) return out;
-    const int Lg = std::max(level, 0);
-    const int S = 1 << Lg;                       // segments per side at the global level
+    int Lg = std::max(level, 0);
 
     subdiv::Cage cage = subdiv::build_cage(uc.points, uc.counts, uc.indices,
                                            uc.crease_indices, uc.crease_lengths, uc.crease_sharpnesses,
                                            uc.corner_indices, uc.corner_sharpnesses,
                                            uc.boundary, uc.triangle_smooth, uc.st);
+    // Per-control-face material tag, remapped below if we pre-subdivide a non-quad cage.
+    std::vector<int> ctag = uc.face_material.empty() ? std::vector<int>(cage.nfaces(), 0) : uc.face_material;
+
+    // A non-quad control cage: take ONE Catmull-Clark step, which turns every face into quads without
+    // changing the limit surface (subdivide chains catmull_clark, carrying creases + UV), so the whole
+    // all-quad adaptive machinery below applies unchanged -- the first step is also the minimal way to
+    // dice an n-gon as quads. catmull_clark emits each face's children parent-contiguously (one quad
+    // per corner), so the material tags remap by a plain per-face fan-out; then one level is consumed.
+    {
+        bool aq = cage.nfaces() > 0;
+        for (int f = 0; f < cage.nfaces() && aq; ++f) if (cage.foff[f + 1] - cage.foff[f] != 4) aq = false;
+        if (!aq) {
+            std::vector<int> child;
+            for (int f = 0; f < cage.nfaces(); ++f) { int m = f < int(ctag.size()) ? ctag[f] : 0;
+                for (int k = cage.foff[f]; k < cage.foff[f + 1]; ++k) child.push_back(m); }
+            cage = subdiv::subdivide(cage, "catmullClark", 1);
+            ctag = std::move(child);
+            Lg = std::max(Lg - 1, 0);
+        }
+    }
+    const int S = 1 << Lg;                       // segments per side at the global level
     const auto vf = subdiv::vertex_faces(cage);
     const int nf = cage.nfaces();
 
@@ -206,7 +227,6 @@ inline std::vector<LayerSegs> amplify_usd_adaptive(const UsdCage& uc,
                 }
 
     double max_disp = 0; for (const Shader* s : shaders) max_disp = std::max(max_disp, s->max_reach());
-    const std::vector<int> ctag = uc.face_material.empty() ? std::vector<int>(nf, 0) : uc.face_material;
     const int M = int(shaders.size());
     // a control edge's segment count -- edge-intrinsic (world length only), so neighbours agree.
     auto side_seg = [&](int f, int c0, int c1) -> int {
@@ -308,9 +328,14 @@ inline size_t usd_adaptive_tri_estimate(const UsdCage& uc, int level, double tol
     };
     size_t tris = 0;
     for (int f = 0; f < nf; ++f) {
-        if (foff[f + 1] - foff[f] != 4) continue;
-        int Ns = std::max(seg(f, 0, 1), seg(f, 3, 2)), Nt = std::max(seg(f, 1, 2), seg(f, 0, 3));
-        tris += (size_t)Ns * Nt * 2;
+        const int c = foff[f + 1] - foff[f];
+        if (c == 4) {
+            int Ns = std::max(seg(f, 0, 1), seg(f, 3, 2)), Nt = std::max(seg(f, 1, 2), seg(f, 0, 3));
+            tris += (size_t)Ns * Nt * 2;
+        } else if (c >= 3) {   // non-quad -> one CC step makes c quad children at level Lg-1
+            const size_t Sc = size_t(1) << std::max(Lg - 1, 0);
+            tris += (size_t)c * Sc * Sc * 2;
+        }
     }
     return tris;
 }
