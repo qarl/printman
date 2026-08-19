@@ -246,7 +246,11 @@ bool load_usd_scene(const std::string& path, const std::string& plugin_dir,
     if (!(mm_per_unit > 0.0)) mm_per_unit = 10.0;   // guard an unset/zero metersPerUnit (USD default cm)
 
     skipped = 0;
-    for (const UsdPrim& p : stage->Traverse()) {
+    // Traverse instance proxies too, so scene-graph-instanced meshes are read (and baked to world)
+    // once per instance -- Traverse() alone skips them. Baking to world means each instance's own
+    // transform (incl. mirror via the det<0 flip) and its device level (world edge lengths) are
+    // correct without a local-frame prototype path. Abstract prototype (class) prims are skipped.
+    for (const UsdPrim& p : UsdPrimRange::Stage(stage, UsdTraverseInstanceProxies())) {
         if (!p.IsA<UsdGeomMesh>()) continue;
         // Skip non-render geometry: proxy/guide stand-ins and invisible prims are not what we print.
         UsdGeomImageable img(p);
