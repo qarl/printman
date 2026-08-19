@@ -81,11 +81,16 @@ Standalone geometry-amplification tool. Design in `DESIGN.md`. This tracks what'
     lattice and emits a **coarser per-face grid** sized to that face's control edges, each shared edge
     snapped to its own edge-intrinsic `device_level` — both sides pick the same lattice nodes, so the
     seam can't tear. No hand-derived limit stencils: the lattice is read off a parametric-`fvar`
-    template through the existing OpenSubdiv-validated subdivider. **All-quad control cages only** — a
-    cage with any non-quad control face (e.g. a UV sphere's triangle poles) stays on the uniform path.
+    template through the existing OpenSubdiv-validated subdivider. **Any control cage** — a non-quad one
+    (an n-gon, a UV sphere's triangle poles) is made all-quad by ONE Catmull-Clark step first, which
+    leaves the limit surface unchanged (subdivision is associative, and `catmull_clark` carries creases
+    + UV), so the same adaptive machinery then dices it; the first step is also the minimal way to
+    represent an n-gon as quads.
     Verified: sphere + earth gates green; a new all-quad box gate green at bands 8/16 (adaptive); a
     closed extraordinary-vertex box and an open 2/18/20 mm strip are both crack-free and band-invariant;
-    a 40×8×8 box emits 36 864 tri vs 196 608 uniform (19%, a 5× cut) with no visible seams.
+    a 40×8×8 box emits 36 864 tri vs 196 608 uniform (19%, a 5× cut) with no visible seams; a closed
+    all-triangle octahedron cage stays band-invariant + watertight + faithful to the uniform extent
+    (`nonquad_adaptive` + `octa_cc_gate`).
 
 ## Build
 
@@ -113,10 +118,9 @@ printman scene.usda --gate --bands 8                       # USD band-invariance
 
 ## NEXT (in priority order — do NOT start mid-context; these are fresh units)
 
-1. **Adaptive CC for non-quad control cages.** Adaptive Catmull-Clark today needs an all-quad control
-   cage; a cage with a triangle/n-gon control face (e.g. a UV sphere's poles) falls back to the uniform
-   band loop. Extend by center-splitting non-quad control faces (as the polygon path does) so their
-   corner-quads get the lattice-subsample treatment too.
+1. **Adaptive CC for non-quad control cages.** DONE (`printman@715f21b`): one Catmull-Clark pre-step
+   makes any cage all-quad (limit surface unchanged), then the adaptive machinery dices it. Gated by
+   `nonquad_adaptive` (octahedron: band-invariant + watertight + faithful) and `octa_cc_gate` (CLI).
 2. **Material-boundary displacement weld.** DONE for the single-material case (`printman@67c46ee`):
    the polygon path welds its micro-mesh by position and per-face-averages, so a non-periodic UV seam
    *within one material* blends crack-free. STILL open: a boundary between two subsets with *different*
