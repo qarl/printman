@@ -53,3 +53,21 @@ if(PRINTMAN_USD)
     ${PM_BOOST} ${USD_ROOT}/lib/libtbb.a
     "-framework CoreFoundation" "-framework Cocoa")
 endif()
+
+# --- Tests: the crack-free + band-invariance gates as an enforced ctest suite -------------------
+# The unit harnesses build their cages in code (no USD/OSL), so they compile and run everywhere and
+# guard the crown-jewel invariants: crack-free adaptive dicing and pixel-exact band-count invariance.
+enable_testing()
+foreach(t poly_watertight adaptive_cc open_cc)
+  add_executable(${t}_test tests/${t}_test.cpp)
+  target_include_directories(${t}_test PRIVATE include third_party)
+  target_compile_options(${t}_test PRIVATE -Wall -Wextra)
+  add_test(NAME ${t} COMMAND ${t}_test)
+endforeach()
+# The built-in procedural sphere band-invariance gate (no USD needed).
+add_test(NAME sphere_gate COMMAND printman --gate --bands 8)
+# The USD band-invariance gate on a committed all-quad Catmull-Clark fixture (only when USD is built).
+if(PRINTMAN_USD)
+  add_test(NAME box_cc_gate
+    COMMAND printman ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/box_cc.usda --gate --bands 8 --subdiv-level 6)
+endif()

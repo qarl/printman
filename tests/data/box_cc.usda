@@ -1,0 +1,12 @@
+#usda 1.0
+( upAxis = "Z" )
+# Non-uniform all-quad box (40 x 8 x 8): long faces have a 40mm edge and an 8mm edge, end caps 8x8.
+# Every corner is valence-3 (extraordinary). catmullClark -> a rounded blob. Adaptive should dice the
+# 40mm direction fine and the 8mm directions coarse, crack-free across the shared tall edges.
+def Mesh "box"
+{
+    point3f[] points = [(0,0,0),(40,0,0),(40,8,0),(0,8,0),(0,0,8),(40,0,8),(40,8,8),(0,8,8)]
+    int[] faceVertexCounts = [4,4,4,4,4,4]
+    int[] faceVertexIndices = [0,3,2,1, 4,5,6,7, 0,1,5,4, 1,2,6,5, 2,3,7,6, 3,0,4,7]
+    uniform token subdivisionScheme = "catmullClark"
+}
